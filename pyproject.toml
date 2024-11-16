@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"  # Tells the build system to use setupto
 
 # Project metadata
 [project]
-name = "AutoWriterLLM"  # The name of the package as it will appear on PyPI
+name = "autowriterllm"  # The name of the package as it will appear on PyPI
 version = "0.1.0"  # The current version of the package (using semantic versioning)
-description = "Automatic book writing tool using Large Language Models"  # A short, one-line description of what the package does
-readme = {file = "README.rst", content-type = "text/x-rst"}  # The path to the README file, which will be used as the long description on PyPI
+description = "A Python tool that helps automatically generate comprehensive book structures and content using Large Language Models (LLMs)"  # A short, one-line description of what the package does
+readme = "README.rst"  # The path to the README file, which will be used as the long description on PyPI
 authors = [
   {name = "Yang Xiong", email = "yxiong@umich.edu"}
 ]

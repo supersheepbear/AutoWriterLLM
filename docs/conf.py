@@ -20,8 +20,16 @@
 import os
 import sys
 sys.path.insert(0, os.path.abspath('..'))
+sys.path.insert(0, os.path.abspath('../src'))
 
-import autowriterllm
+# Handle the case when the module is not installed
+try:
+    import autowriterllm
+    version = autowriterllm.__version__
+    release = autowriterllm.__version__
+except ImportError:
+    version = '0.1.0'
+    release = '0.1.0'
 
 # -- General configuration ---------------------------------------------
 
