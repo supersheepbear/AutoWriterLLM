@@ -141,10 +141,32 @@ class MarkdownToPDFConverter:
 
             # Custom sorting function for chapter files
             def chapter_sort_key(filename: str) -> tuple:
+                """Create a sort key for chapter filenames.
+                
+                Args:
+                    filename: The filename to create a sort key for
+                    
+                Returns:
+                    A tuple of integers representing the chapter number
+                    
+                Example:
+                    'chapter-1-2.md' -> (1, 2)
+                    'chapter-1. introduction.md' -> (1,)
+                """
                 # Remove 'chapter-' prefix and '.md' suffix
-                parts = filename.replace('chapter-', '').replace('.md', '').split('-')
-                # Convert each part to integer for proper numerical sorting
-                return tuple(int(p) for p in parts)
+                base = filename.replace('chapter-', '').replace('.md', '')
+                
+                # Extract all numbers from the start of the string
+                numbers = []
+                for part in base.split('-'):
+                    # Extract first number from the part
+                    match = re.match(r'(\d+)', part)
+                    if match:
+                        numbers.append(int(match.group(1)))
+                    else:
+                        break
+                
+                return tuple(numbers) if numbers else (float('inf'),)  # Return inf if no numbers found
 
             # Sort files using the custom sort key
             sorted_files = sorted(all_md_files, key=chapter_sort_key)
@@ -161,16 +183,24 @@ class MarkdownToPDFConverter:
 
     def _read_file_with_fallback_encoding(self, file_path: Path) -> str:
         """Read file content with fallback encodings."""
-        encodings = ["utf-8", "utf-8-sig", "gbk", "gb2312", "gb18030", "latin1"]
-
+        encodings = ["utf-8-sig", "utf-8", "latin1"]  # Simplified encoding list
+        
+        errors = []
         for encoding in encodings:
             try:
                 logger.debug(f"Trying to read {file_path} with {encoding} encoding")
-                return file_path.read_text(encoding=encoding)
-            except UnicodeError:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                    # Normalize line endings
+                    content = content.replace('\r\n', '\n')
+                    return content
+            except UnicodeError as e:
+                errors.append(f"{encoding}: {str(e)}")
                 continue
 
-        raise UnicodeError(f"Failed to read {file_path} with any supported encoding")
+        error_msg = f"Failed to read {file_path} with any supported encoding:\n" + "\n".join(errors)
+        logger.error(error_msg)
+        raise UnicodeError(error_msg)
 
     def _process_markdown_files(self, files: List[str]) -> List[str]:
         """Process markdown files in parallel.
@@ -239,75 +269,143 @@ class MarkdownToPDFConverter:
 
     def _create_combined_markdown(self, temp_md: Path, contents: List[str]):
         """Create a combined markdown file from processed markdown content."""
-        # Add title page with UTF-8 BOM
+        # Add title page without BOM
         title = self.toc_file.stem.replace("_", " ").title()
         combined_content = [
-            "\ufeff",  # UTF-8 BOM
-            f"% {title}",
-            f"% Generated on {datetime.datetime.now().strftime('%Y-%m-%d')}",
+            f"---",
+            f"title: {title}",
+            f"date: {datetime.datetime.now().strftime('%Y-%m-%d')}",
+            f"---",
             "\n\n",
         ]
 
-        # Add table of contents marker
-        combined_content.append("\\tableofcontents\n\n")
+        # Process and combine all markdown content
+        for content in contents:
+            lines = content.split('\n')
+            processed_lines = []
+            
+            i = 0
+            while i < len(lines):
+                line = lines[i].rstrip()
+                
+                # Skip empty lines at the start
+                if not processed_lines and not line:
+                    i += 1
+                    continue
 
-        # Combine all markdown content
-        combined_content.extend(contents)
+                processed_lines.append(line)
+                i += 1
 
-        # Write combined content to temporary file with UTF-8 encoding
-        temp_md.write_text("\n\n".join(combined_content), encoding="utf-8-sig")
+            # Add processed content with double newlines between sections
+            if processed_lines:
+                combined_content.append('\n'.join(processed_lines))
+
+        # Write combined content to temporary file with UTF-8 encoding (no BOM)
+        logger.debug(f"Writing combined content with {len(combined_content)} sections")
+        temp_md.write_text('\n\n'.join(combined_content), encoding='utf-8')
 
     def _run_pandoc_conversion(self, temp_md: Path, output_file: Path):
-        """Run pandoc conversion using the combined markdown file.
-        
-        Args:
-            temp_md: Path to temporary combined markdown file
-            output_file: Path where the output PDF will be saved
-            
-        Raises:
-            subprocess.CalledProcessError: If pandoc conversion fails
-        """
+        """Run pandoc conversion using the combined markdown file."""
         # Get title from toc file
         title = self.toc_file.stem.replace("_", " ").title()
         
-        # Build pandoc command with explicit wkhtmltopdf path
-        cmd = [
-            "pandoc",
-            str(temp_md),
-            f"--pdf-engine={self.wkhtmltopdf_path}",
-            "--toc",
-            "--toc-depth=3",
-            "-V",
-            "geometry:margin=1in",
-            "-V",
-            "linkcolor:blue",
-            "-V",
-            "documentclass=report",
-            "-V",
-            f"title={title}",
-            "-N",
-            "--highlight-style=tango",
-            "-f",
-            "markdown+smart+fenced_code_blocks+auto_identifiers",
-            "-o",
-            str(output_file),
-        ]
-
-        logger.info(f"Running pandoc command: {' '.join(cmd)}")
-
+        # Create a temporary header file with proven LaTeX settings
+        header_file = self.output_dir / "header.tex"
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, encoding="utf-8"
-            )
+            # Simplified LaTeX header with essential settings
+            header_content = r"""
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
 
-            if result.stderr:
-                logger.warning(f"Pandoc warnings: {result.stderr}")
+% Page setup
+\geometry{a4paper, margin=1in}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\nouppercase{\leftmark}}
+\fancyhead[R]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
 
-            logger.info(f"Successfully created PDF: {output_file}")
+% Chapter and section formatting - removed numbering
+\titleformat{\chapter}
+{\normalfont\huge\bfseries}{}{0pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-20pt}{40pt}
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Pandoc conversion failed: {e.stderr}")
+% Remove section numbering
+\setcounter{secnumdepth}{0}
+
+% Rest of the header content remains the same...
+"""
+            header_file.write_text(header_content, encoding='utf-8')
+            
+            # Build pandoc command - removed --number-sections
+            cmd = [
+                "pandoc",
+                str(temp_md),
+                "--pdf-engine=xelatex",
+                "--toc",
+                "--toc-depth=3",
+                "--top-level-division=chapter",
+                "-V",
+                "documentclass=report",
+                "-V",
+                f"title={title}",
+                "--highlight-style=pygments",
+                "-f",
+                "markdown+smart+fenced_code_blocks+auto_identifiers",
+                "--listings",
+                f"--include-in-header={header_file}",
+                "--wrap=none",
+                "-V",
+                "papersize=a4",
+                "-V",
+                "fontsize=11pt",
+                "-V",
+                "geometry:margin=1in",
+                "-V",
+                "linkcolor=blue",
+                "--variable",
+                "urlcolor=blue",
+                "--variable",
+                "toccolor=black",
+                "-V",
+                "colorlinks=true",
+                "--pdf-engine-opt=-shell-escape",
+                "--verbose",
+                "-o",
+                str(output_file),
+            ]
+
+            logger.info(f"Running pandoc command: {' '.join(cmd)}")
+
+            try:
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    check=True, 
+                    encoding="utf-8"
+                )
+                
+                if result.stderr:
+                    logger.warning(f"Pandoc warnings: {result.stderr}")
+                    
+                logger.info(f"Successfully created PDF: {output_file}")
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Pandoc conversion failed with return code {e.returncode}")
+                logger.error(f"Error output:\n{e.stderr}")
+                raise
+
+        except Exception as e:
+            logger.error(f"PDF conversion failed: {str(e)}")
             raise
+        finally:
+            # Clean up temporary header file
+            if header_file.exists():
+                header_file.unlink()
 
     def _cleanup(self):
         """Clean up temporary files and resources."""
