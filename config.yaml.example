@@ -1,0 +1,44 @@
+# API Configuration
+api:
+  anthropic:
+    api_key: "your-anthropic-api-key-here"  # Replace with your actual API key
+    model: "claude-3-sonnet-20240229"       # Specify Claude model version
+    max_tokens: 4096                        # Maximum tokens per request
+    temperature: 0.7                        # Controls randomness (0.0-1.0)
+
+# Output Configuration
+output:
+  directory: "output"                       # Directory for generated content
+  format: "markdown"                        # Output format (markdown/rst)
+
+# Logging Configuration
+logging:
+  level: "INFO"                            # Logging level (DEBUG/INFO/WARNING/ERROR)
+  file: "logs/autowriter.log"              # Log file location
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Content Generation Settings
+generation:
+  max_chapters: 15                         # Maximum number of chapters
+  include_exercises: true                  # Include practice exercises
+  include_examples: true                   # Include code examples
+  language: "en"                           # Content language
+
+# Template Settings
+templates:
+  directory: "templates"                   # Directory containing templates
+  toc_template: "toc_template.md"         # Table of contents template
+  chapter_template: "chapter_template.md"  # Chapter template 
+
+# Anthropic Configuration
+anthropic:
+  api_key: your-anthropic-api-key-here
+  model: claude-3-sonnet-20240229
+
+# Lingyiwanwu Configuration
+lingyiwanwu:
+  api_key: your-lingyiwanwu-api-key-here
+  model: yi-lightning
+
+# Default Provider
+provider: anthropic  # Options: anthropic, lingyiwanwu
