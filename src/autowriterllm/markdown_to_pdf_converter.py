@@ -279,6 +279,9 @@ class MarkdownToPDFConverter:
             "\n\n",
         ]
 
+        # Keep track of seen headers to avoid duplicates
+        seen_headers = set()
+
         # Process and combine all markdown content
         for content in contents:
             lines = content.split('\n')
@@ -293,7 +296,33 @@ class MarkdownToPDFConverter:
                     i += 1
                     continue
 
-                processed_lines.append(line)
+                # Check for headers (both # style and === style)
+                is_header = False
+                header_text = None
+
+                # Check for ATX style headers (# or ##)
+                if line.strip().startswith(('#', '##')):
+                    header_text = line.strip()
+                    is_header = True
+
+                # Check for Setext style headers (=== or ---)
+                elif (i + 1 < len(lines) and 
+                      lines[i + 1].strip() and 
+                      all(c in '=-' for c in lines[i + 1].strip())):
+                    header_text = line.strip()
+                    is_header = True
+                    i += 1  # Skip the underline
+
+                # Process header
+                if is_header and header_text:
+                    if header_text not in seen_headers:
+                        seen_headers.add(header_text)
+                        processed_lines.append(line)
+                        if i + 1 < len(lines) and all(c in '=-' for c in lines[i + 1].strip()):
+                            processed_lines.append(lines[i + 1])
+                else:
+                    processed_lines.append(line)
+
                 i += 1
 
             # Add processed content with double newlines between sections
@@ -336,7 +365,47 @@ class MarkdownToPDFConverter:
 % Remove section numbering
 \setcounter{secnumdepth}{0}
 
-% Rest of the header content remains the same...
+% Code block styling
+\definecolor{codebackground}{RGB}{248,248,248}
+\definecolor{codecomment}{RGB}{106,153,85}
+\definecolor{codekeyword}{RGB}{86,156,214}
+\definecolor{codestring}{RGB}{206,145,120}
+
+% Configure listings for copy-friendly code blocks
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebackground},
+    breaklines=true,
+    breakatwhitespace=false,
+    numbers=none,  % Removed line numbers
+    keywordstyle=\color{codekeyword},
+    commentstyle=\color{codecomment},
+    stringstyle=\color{codestring},
+    frame=single,
+    tabsize=4,
+    showstringspaces=false,
+    showspaces=false,
+    showtabs=false,
+    captionpos=b,
+    breakindent=0pt,
+    xleftmargin=0.5em,  % Reduced left margin since we removed line numbers
+    xrightmargin=0.5em,
+    language=Python,
+    escapeinside={(*@}{@*)},
+    keepspaces=true,
+    columns=flexible,
+    basewidth=0.5em,
+    mathescape=true,
+    upquote=true,  % Use straight quotes
+    literate={*}{{\char42}}1  % Fix asterisk rendering
+}
+
+% Fix for long code blocks
+\lstset{
+    breaklines=true,
+    postbreak=\mbox{\textcolor{red}{$\hookrightarrow$}\space},
+    breakindent=0pt
+}
 """
             header_file.write_text(header_content, encoding='utf-8')
             
