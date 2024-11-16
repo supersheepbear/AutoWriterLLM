@@ -25,6 +25,14 @@ Requirements
 * Python 3.9+
 * Valid API key for supported LLM providers
 
+Documentation
+------------
+
+The full documentation is available on ReadTheDocs:
+
+* Latest release: https://autowriterllm.readthedocs.io/en/latest/
+* Development version: https://autowriterllm.readthedocs.io/en/develop/
+
 License
 -------
 
