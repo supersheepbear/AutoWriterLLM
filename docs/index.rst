@@ -1,5 +1,5 @@
 Welcome to AutoWriterLLM's documentation!
-======================================
+========================================
 
 .. toctree::
    :maxdepth: 2
@@ -12,6 +12,7 @@ Welcome to AutoWriterLLM's documentation!
    contributing
    authors
    history
+   CODE_OF_CONDUCT
 
 Indices and tables
 ==================

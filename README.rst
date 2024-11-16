@@ -13,20 +13,13 @@ Features
 * Integration with multiple LLM providers (Anthropic Claude, Yi)
 
 Installation
------------
-
-.. code-block:: console
-
-    pip install autowriterllm
+------------
 
 Requirements
------------
-
-* Python 3.9+
-* Valid API key for supported LLM providers
+------------
 
 Documentation
-------------
+-------------
 
 The full documentation is available on ReadTheDocs:
 
