@@ -1,3 +1,56 @@
+# AutoWriterLLM Configuration Example
+# Copy this file to config.yaml and update with your settings
+
+# API Provider Configuration
+provider: "anthropic"  # Options: "anthropic", "lingyiwanwu"
+
+# Anthropic API Configuration
+anthropic:
+  api_key: "your_anthropic_api_key_here"
+  model: "claude-3-opus-20240229"  # Options: "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"
+
+# Lingyiwanwu API Configuration (alternative provider)
+lingyiwanwu:
+  api_key: "your_lingyiwanwu_api_key_here"
+  model: "claude-3-opus-20240229"
+
+# Content Generation Options
+# These options control how content is generated
+
+# Multi-part content generation
+# When enabled, each section is broken into multiple parts for more comprehensive content
+multi_part_generation: true
+parts_per_section: 5  # Number of parts to generate for each section
+max_tokens_per_part: 8192  # Maximum tokens per part
+
+# Context Management Options
+# These options control how context from previous sections is used
+include_learning_metadata: true  # Include learning objectives and prerequisites
+include_previous_chapter_context: true  # Include context from previous chapters
+include_previous_section_context: true  # Include context from previous sections
+
+# Output Options
+output_dir: "output"  # Directory for generated content
+cache_dir: "cache"  # Directory for cached content
+
+# Rate Limiting
+rate_limit:
+  enabled: true
+  requests_per_minute: 10  # Maximum API requests per minute
+
+# Vector Database Options
+vector_db:
+  enabled: true
+  collection_name: "book_content"
+  embedding_model: "all-MiniLM-L6-v2"
+
+# Logging Options
+logging:
+  level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  file: "logs/autowriterllm.log"
+  max_size_mb: 10
+  backup_count: 5
+
 # API Configuration
 api:
   anthropic:
@@ -29,16 +82,3 @@ templates:
   directory: "templates"                   # Directory containing templates
   toc_template: "toc_template.md"         # Table of contents template
   chapter_template: "chapter_template.md"  # Chapter template 
-
-# Anthropic Configuration
-anthropic:
-  api_key: your-anthropic-api-key-here
-  model: claude-3-sonnet-20240229
-
-# Lingyiwanwu Configuration
-lingyiwanwu:
-  api_key: your-lingyiwanwu-api-key-here
-  model: yi-lightning
-
-# Default Provider
-provider: anthropic  # Options: anthropic, lingyiwanwu

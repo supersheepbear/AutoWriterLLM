@@ -315,14 +315,42 @@ class ContentGenerator:
             ValueError: If configuration is invalid
         """
         try:
+            # Default configuration
+            default_config = {
+                "provider": "anthropic",
+                "anthropic": {
+                    "model": "claude-3-opus-20240229"
+                },
+                "lingyiwanwu": {
+                    "model": "claude-3-opus-20240229"
+                },
+                # Content generation options
+                "include_learning_metadata": True,
+                "include_previous_chapter_context": True,
+                "include_previous_section_context": True,
+                "multi_part_generation": True,
+                "parts_per_section": 5,
+                "max_tokens_per_part": 8192
+            }
+            
             config_path = Path("config.yaml")
             if config_path.exists():
                 with open(config_path) as f:
-                    config = yaml.safe_load(f)
-                    if config.get("provider") not in ["anthropic", "lingyiwanwu"]:
+                    user_config = yaml.safe_load(f)
+                    if user_config.get("provider") not in ["anthropic", "lingyiwanwu"]:
                         raise ValueError("Invalid provider specified in config")
-                    return config
-            raise ValueError("Config file not found")
+                    
+                    # Merge user config with default config
+                    for key, value in user_config.items():
+                        if isinstance(value, dict) and key in default_config and isinstance(default_config[key], dict):
+                            default_config[key].update(value)
+                        else:
+                            default_config[key] = value
+                    
+                    return default_config
+            else:
+                logger.warning("Config file not found, using default configuration")
+                return default_config
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             raise
@@ -519,17 +547,31 @@ class ContentGenerator:
             return "No previous chapter summaries available"
 
     def _request_chapter_summary(self, section: Section, content: str) -> str:
-        """Request AI to generate a chapter summary."""
+        """Request AI to generate a chapter summary.
+        
+        This generates a concise summary of the chapter's key concepts without
+        recapping previous chapters. The summary is used for internal context
+        management only and is not included in the final content.
+        
+        Args:
+            section: The section to summarize
+            content: The content to summarize
+            
+        Returns:
+            str: The generated summary
+        """
         try:
             summary_prompt = f"""Please provide a concise summary (2-3 sentences) of the following chapter content. 
-Focus on the main concepts and how they build upon previous chapters.
+Focus ONLY on the key concepts covered in THIS chapter.
+DO NOT reference or recap previous chapters.
+DO NOT include introductory phrases like "This chapter covers..." or "In this chapter, we learned..."
 
 Chapter: {section.title}
 
 Content:
-{content[:1000]}  # Using first 1000 chars for summary
+{content[:2000]}  # Using first 2000 chars for summary
 
-Generate a summary that will help maintain context between chapters."""
+Generate a summary that captures the essential concepts of this chapter only."""
 
             summary = self._generate_with_retry(summary_prompt)
             return summary.strip()
@@ -559,19 +601,54 @@ Generate a summary that will help maintain context between chapters."""
                 filename = self._create_filename(section)
                 return cached_content, filename
         
-        # Wait for rate limiting if needed
-        if hasattr(self, 'rate_limiter'):
-            self.rate_limiter.wait_if_needed()
-        
         # Determine if this is an introduction
         is_introduction = section.title.lower().startswith("introduction") or section.level == 1
         
-        # Create prompt with context
-        prompt = self._create_prompt(section, is_introduction)
-        
-        # Generate content
+        # Generate content in multiple parts for more comprehensive coverage
         try:
-            content = self._generate_with_retry(prompt)
+            # Check if multi-part generation is enabled
+            use_multi_part = self.config.get("multi_part_generation", True)
+            
+            if use_multi_part:
+                # Number of parts to generate for each section
+                total_parts = self.config.get("parts_per_section", 5)
+                all_content_parts = []
+                
+                logger.info(f"Generating content for '{section.title}' in {total_parts} parts")
+                
+                for part_number in range(1, total_parts + 1):
+                    logger.info(f"Generating part {part_number}/{total_parts} for '{section.title}'")
+                    
+                    # Wait for rate limiting if needed
+                    if hasattr(self, 'rate_limiter'):
+                        self.rate_limiter.wait_if_needed()
+                    
+                    # Create prompt with context for this specific part
+                    prompt = self._create_prompt(section, is_introduction, part_number=part_number, total_parts=total_parts)
+                    
+                    # Generate content for this part
+                    part_content = self._generate_with_retry(prompt)
+                    all_content_parts.append(part_content)
+                    
+                    logger.info(f"Successfully generated part {part_number}/{total_parts} for '{section.title}'")
+                
+                # Combine all parts into a single content
+                content = "\n\n".join(all_content_parts)
+            else:
+                # Generate content in a single part (original method)
+                logger.info(f"Generating content for '{section.title}' in a single part")
+                
+                # Wait for rate limiting if needed
+                if hasattr(self, 'rate_limiter'):
+                    self.rate_limiter.wait_if_needed()
+                
+                # Create prompt with context
+                prompt = self._create_prompt(section, is_introduction)
+                
+                # Generate content
+                content = self._generate_with_retry(prompt)
+                
+                logger.info(f"Successfully generated content for '{section.title}'")
             
             # Improve content quality
             if hasattr(self, 'code_analyzer') and content_type == "programming":
@@ -802,13 +879,15 @@ Generate a summary that will help maintain context between chapters."""
             return "generic"
 
     def _create_prompt(self, section: Section, is_introduction: bool = False, 
-                      context: Dict[str, Any] = None) -> str:
+                      context: Dict[str, Any] = None, part_number: int = None, total_parts: int = None) -> str:
         """Create a prompt for content generation.
         
         Args:
             section: The section to generate content for
             is_introduction: Whether this is an introduction section
             context: Additional context information
+            part_number: Current part number when generating content in multiple parts
+            total_parts: Total number of parts for the section
             
         Returns:
             str: The prompt for the AI
@@ -828,95 +907,138 @@ Generate a summary that will help maintain context between chapters."""
         
         # Create specific prompt based on content type
         if is_introduction:
-            return self._create_specific_prompt(section, combined_context, is_introduction)
+            return self._create_specific_prompt(section, combined_context, is_introduction, part_number, total_parts)
         
-        # Base prompt structure
+        # Base prompt structure with multi-part instructions if applicable
+        part_instructions = ""
+        if part_number is not None and total_parts is not None:
+            part_instructions = f"""
+IMPORTANT: This is part {part_number} of {total_parts} for this section. 
+"""
+            if part_number == 1:
+                part_instructions += """
+For this first part:
+- Provide a brief introduction to the topic
+- Begin explaining the core concepts in depth
+- Include detailed examples and illustrations
+- DO NOT include a summary at the end of this part
+"""
+            elif part_number < total_parts:
+                part_instructions += f"""
+For part {part_number}:
+- Continue directly from where part {part_number-1} left off
+- DO NOT recap what was covered in previous parts
+- Focus on new content and examples
+- Explore concepts in greater depth
+- DO NOT include a summary at the end of this part
+"""
+            else:  # Last part
+                part_instructions += f"""
+For this final part:
+- Continue directly from where part {part_number-1} left off
+- DO NOT recap what was covered in previous parts
+- Complete any remaining explanations and examples
+- Provide a concise conclusion for the entire section
+"""
+        
         prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
-Write the content for the section titled "{section.title}".
+Write the content for the section titled "{section.title}".{part_instructions}
 
 CONTEXT INFORMATION:
 {combined_context}
 
 GUIDELINES:
 1. Write detailed, accurate, and educational content
-2. Use clear explanations with examples
+2. Use clear explanations with MULTIPLE in-depth examples
 3. Include relevant diagrams, tables, or illustrations (described in markdown)
 4. Add practical examples where appropriate
-5. Include section summaries and key takeaways
-6. Format using proper markdown with headings, lists, and emphasis
-7. Ensure content is engaging and accessible to the target audience
+5. Format using proper markdown with headings, lists, and emphasis
+6. Ensure content is engaging and accessible to the target audience
+7. DO NOT recap content from previous chapters
+8. DO NOT include unnecessary summaries within the content
+9. Focus on providing comprehensive, in-depth explanations
 """
 
         # Add content-specific guidelines based on the type
         if content_type == "programming":
             prompt += """
-8. Include well-commented code examples
-9. Explain algorithms and data structures clearly
-10. Cover best practices and common pitfalls
-11. Include debugging tips and performance considerations
+10. Include well-commented code examples
+11. Explain algorithms and data structures clearly
+12. Cover best practices and common pitfalls
+13. Include debugging tips and performance considerations
+14. Provide multiple code examples for each concept
 """
         elif content_type == "science":
             prompt += """
-8. Include scientific principles and theories
-9. Explain experimental methods and results
-10. Reference important studies and findings
-11. Include diagrams of scientific processes
+10. Include scientific principles and theories
+11. Explain experimental methods and results
+12. Reference important studies and findings
+13. Include diagrams of scientific processes
+14. Provide multiple examples of scientific applications
 """
         elif content_type == "mathematics":
             prompt += """
-8. Include clear mathematical notation using LaTeX
-9. Provide step-by-step derivations of formulas
-10. Include visual representations of mathematical concepts
-11. Provide practice problems with solutions
+10. Include clear mathematical notation using LaTeX
+11. Provide step-by-step derivations of formulas
+12. Include visual representations of mathematical concepts
+13. Provide practice problems with solutions
+14. Offer multiple approaches to solving problems
 """
         elif content_type == "history":
             prompt += """
-8. Include accurate dates and chronology
-9. Provide context for historical events
-10. Include perspectives from different historical sources
-11. Connect historical events to broader themes
+10. Include accurate dates and chronology
+11. Provide context for historical events
+12. Include perspectives from different historical sources
+13. Connect historical events to broader themes
+14. Analyze historical events in depth
 """
         elif content_type == "literature":
             prompt += """
-8. Include analysis of literary techniques
-9. Provide examples from important texts
-10. Discuss cultural and historical context of works
-11. Include biographical information about key authors
+10. Include analysis of literary techniques
+11. Provide examples from important texts
+12. Discuss cultural and historical context of works
+13. Include biographical information about key authors
+14. Offer multiple interpretations of literary works
 """
         elif content_type == "business":
             prompt += """
-8. Include case studies of real businesses
-9. Provide practical frameworks and models
-10. Include market analysis and trends
-11. Discuss ethical considerations in business
+10. Include case studies of real businesses
+11. Provide practical frameworks and models
+12. Include market analysis and trends
+13. Discuss ethical considerations in business
+14. Offer multiple business strategy examples
 """
         elif content_type == "arts":
             prompt += """
-8. Include descriptions of artistic techniques
-9. Provide historical context for artistic movements
-10. Include analysis of notable works
-11. Discuss the cultural impact of art
+10. Include descriptions of artistic techniques
+11. Provide historical context for artistic movements
+12. Include analysis of notable works
+13. Discuss the cultural impact of art
+14. Offer multiple examples of artistic styles
 """
         elif content_type == "medicine":
             prompt += """
-8. Include accurate medical terminology
-9. Describe diagnostic criteria and treatment protocols
-10. Include anatomical diagrams and illustrations
-11. Discuss current research and evidence-based practices
+10. Include accurate medical terminology
+11. Describe diagnostic criteria and treatment protocols
+12. Include anatomical diagrams and illustrations
+13. Discuss current research and evidence-based practices
+14. Provide multiple clinical examples
 """
         elif content_type == "philosophy":
             prompt += """
-8. Include clear explanations of philosophical concepts
-9. Provide historical context for philosophical ideas
-10. Present different perspectives on philosophical questions
-11. Include thought experiments and logical arguments
+10. Include clear explanations of philosophical concepts
+11. Provide historical context for philosophical ideas
+12. Present different perspectives on philosophical questions
+13. Include thought experiments and logical arguments
+14. Analyze philosophical arguments in depth
 """
         elif content_type == "language":
             prompt += """
-8. Include examples of language usage
-9. Provide clear explanations of grammatical rules
-10. Include pronunciation guides where relevant
-11. Discuss cultural aspects of language
+10. Include examples of language usage
+11. Provide clear explanations of grammatical rules
+12. Include pronunciation guides where relevant
+13. Discuss cultural aspects of language
+14. Offer multiple examples of language patterns
 """
         
         # Add section-specific instructions
@@ -927,6 +1049,7 @@ ADDITIONAL INSTRUCTIONS:
 - Include a mix of easy, medium, and challenging exercises
 - Provide hints for difficult exercises
 - Include answer keys or solution guidelines
+- Create a large number of varied exercises
 """
         
         if "summary" in section.title.lower() or "conclusion" in section.title.lower():
@@ -945,6 +1068,7 @@ ADDITIONAL INSTRUCTIONS:
 - Connect theoretical concepts to practical application
 - Include analysis and lessons learned
 - Suggest how readers can apply similar approaches
+- Provide multiple in-depth case studies
 """
         
         prompt += f"""
@@ -954,8 +1078,23 @@ Write comprehensive content for the section titled "{section.title}".
         return prompt
 
     def _get_immediate_previous_context(self, section: Section) -> str:
-        """Get context from immediately preceding section."""
+        """Get context from immediately preceding section.
+        
+        This method retrieves context from the immediately preceding section
+        if configured to do so. It focuses on key concepts rather than providing
+        a full recap of previous content.
+        
+        Args:
+            section: The current section
+            
+        Returns:
+            str: The immediate previous context
+        """
         try:
+            # Check if we should include previous section context
+            if not self.config.get("include_previous_section_context", True):
+                return ""
+                
             current_index = next(
                 (i for i, s in enumerate(self.sections) if s.title == section.title),
                 -1
@@ -967,14 +1106,28 @@ Write comprehensive content for the section titled "{section.title}".
                 
                 if prev_file.exists():
                     content = self._read_file_with_encoding(prev_file)
+                    
+                    # If this is a new chapter, only provide minimal context
+                    if section.level == 1:
+                        # Just provide the title of the previous chapter
+                        return f"Previous chapter: {prev_section.title}"
+                    
                     # Extract conclusion or summary section if present
                     summary_match = re.search(r'#+\s*(?:Summary|Conclusion).*?\n(.*?)(?:\n#|$)', 
                                             content, re.DOTALL)
                     if summary_match:
-                        return summary_match.group(1).strip()
-                    # Otherwise return last paragraph
+                        # Limit the summary to a reasonable length
+                        summary = summary_match.group(1).strip()
+                        if len(summary) > 500:
+                            summary = summary[:500] + "..."
+                        return summary
+                    
+                    # Otherwise return last paragraph, but limit length
                     paragraphs = content.split('\n\n')
-                    return paragraphs[-1].strip()
+                    last_para = paragraphs[-1].strip()
+                    if len(last_para) > 300:
+                        last_para = last_para[:300] + "..."
+                    return last_para
                     
             return ""
             
@@ -1289,16 +1442,34 @@ Do not include any other text in your response besides these two markdown code b
             self.time_label.pack(pady=5)
 
     def _generate_with_retry(self, prompt: str, max_retries: int = 10) -> str:
-        """Generate content with automatic retry on failure."""
+        """Generate content with automatic retry on failure.
+        
+        This method handles the actual API calls to generate content. When generating
+        multi-part content, this method is called multiple times with different prompts
+        for each part, and the results are combined later.
+        
+        Args:
+            prompt: The prompt to send to the AI
+            max_retries: Maximum number of retries on failure
+            
+        Returns:
+            str: The generated content
+            
+        Raises:
+            ContentGenerationError: If content generation fails after all retries
+        """
         for attempt in range(max_retries):
             try:
                 logger.info(f"Generation attempt {attempt + 1}/{max_retries}")
+                
+                # Get max tokens from config
+                max_tokens = self.config.get("max_tokens_per_part", 8192)
                 
                 if self.config["provider"] == "anthropic":
                     logger.debug("Using Anthropic API")
                     response = self.client.messages.create(
                         model=self.config["anthropic"]["model"],
-                        max_tokens=4096,
+                        max_tokens=max_tokens,
                         temperature=0.7,
                         messages=[{"role": "user", "content": prompt}]
                     )
@@ -1320,11 +1491,11 @@ Do not include any other text in your response besides these two markdown code b
                             {"role": "user", "content": prompt}
                         ],
                         "temperature": 0.7,
-                        "max_tokens": 4096
+                        "max_tokens": max_tokens
                     }
                     
                     logger.debug(f"Request data: {data}")
-                    response = requests.post(url, headers=headers, json=data, timeout=60)
+                    response = requests.post(url, headers=headers, json=data, timeout=120)  # Increased timeout
                     
                     if response.status_code != 200:
                         logger.error(f"API error: {response.status_code} - {response.text}")
@@ -1614,15 +1785,35 @@ Return the improved content with the same structure but addressing the suggestio
     def _add_learning_metadata(self, content: str,
                          objectives: List[LearningObjective],
                          prerequisites: List[str]) -> str:
-        """Add learning objectives and prerequisites to content."""
+        """Add learning objectives and prerequisites to content.
+        
+        This method adds learning objectives and prerequisites to the content
+        if configured to do so. The metadata is added at the beginning of the
+        content and focuses only on the current chapter without recapping
+        previous chapters.
+        
+        Args:
+            content: The content to add metadata to
+            objectives: List of learning objectives
+            prerequisites: List of prerequisites
+            
+        Returns:
+            str: The content with metadata added
+        """
         try:
+            # Check if learning metadata should be included
+            if not self.config.get("include_learning_metadata", True):
+                return content
+                
             metadata = "## Learning Objectives\n\n"
             for objective in objectives:
                 metadata += f"- {objective.description}\n"
             
-            metadata += "\n## Prerequisites\n\n"
-            for prereq in prerequisites:
-                metadata += f"- {prereq}\n"
+            # Only include prerequisites if there are any
+            if prerequisites:
+                metadata += "\n## Prerequisites\n\n"
+                for prereq in prerequisites:
+                    metadata += f"- {prereq}\n"
             
             return metadata + "\n\n" + content
         except Exception as e:
@@ -1630,7 +1821,18 @@ Return the improved content with the same structure but addressing the suggestio
             return content
 
     def _create_hierarchical_context(self, section: Section) -> str:
-        """Create a hierarchical context for the current section."""
+        """Create a hierarchical context for the current section.
+        
+        This method creates a context for the current section based on previous
+        chapters. It limits the amount of context to avoid overwhelming the
+        content generation with too much previous information.
+        
+        Args:
+            section: The current section
+            
+        Returns:
+            str: The hierarchical context
+        """
         context_parts = []
         
         # Find current chapter index
@@ -1638,10 +1840,17 @@ Return the improved content with the same structure but addressing the suggestio
             (i for i, s in enumerate(self.sections) if s.title == section.title), -1
         )
         
-        # Get summaries for all previous chapters
-        for section in self.sections[:current_index]:
+        # Get summaries for only the most recent chapters (limit to 3)
+        # This prevents overwhelming the context with too much previous information
+        recent_sections = self.sections[max(0, current_index-3):current_index]
+        
+        # Check if we should include previous chapter context
+        if not self.config.get("include_previous_chapter_context", True):
+            return ""
+        
+        for section in recent_sections:
             if summary := self.chapter_summaries.get(section.title):
-                context_parts.append(f"\nChapter: {section.title}\nSummary: {summary.summary}")
+                context_parts.append(f"\nChapter: {section.title}\nKey Concepts: {summary}")
         
         return "\n".join(context_parts)
 
@@ -1723,22 +1932,54 @@ Content structure:
 Format the response in markdown."""
 
     def _create_specific_prompt(self, section: Section, context: str, 
-                              is_introduction: bool) -> str:
+                              is_introduction: bool, part_number: int = None, total_parts: int = None) -> str:
         """Create a specific prompt based on section type.
         
         Args:
             section: The section to generate content for
             context: Context information
             is_introduction: Whether this is an introduction section
+            part_number: Current part number when generating content in multiple parts
+            total_parts: Total number of parts for the section
             
         Returns:
             str: The specialized prompt
         """
         content_type = self._determine_tutorial_type()
         
+        # Add multi-part instructions if applicable
+        part_instructions = ""
+        if part_number is not None and total_parts is not None:
+            part_instructions = f"""
+IMPORTANT: This is part {part_number} of {total_parts} for this section. 
+"""
+            if part_number == 1:
+                part_instructions += """
+For this first part:
+- Begin with a strong introduction
+- Start explaining key concepts
+- DO NOT include a summary at the end of this part
+"""
+            elif part_number < total_parts:
+                part_instructions += f"""
+For part {part_number}:
+- Continue directly from where part {part_number-1} left off
+- DO NOT recap what was covered in previous parts
+- Focus on new content and examples
+- DO NOT include a summary at the end of this part
+"""
+            else:  # Last part
+                part_instructions += f"""
+For this final part:
+- Continue directly from where part {part_number-1} left off
+- DO NOT recap what was covered in previous parts
+- Complete any remaining explanations
+- Provide a concise conclusion
+"""
+        
         if is_introduction:
             prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
-Write an engaging introduction chapter titled "{section.title}".
+Write an engaging introduction chapter titled "{section.title}".{part_instructions}
 
 CONTEXT INFORMATION:
 {context}
@@ -1751,6 +1992,7 @@ GUIDELINES:
 5. Explain who the target audience is and what prerequisites are needed
 6. Use accessible language and engaging examples
 7. Format using proper markdown with headings, lists, and emphasis
+8. DO NOT include unnecessary summaries or recaps
 
 Write comprehensive content for the introduction titled "{section.title}".
 """
@@ -1761,7 +2003,7 @@ Write comprehensive content for the introduction titled "{section.title}".
         
         if "conclusion" in section_title_lower or "summary" in section_title_lower:
             prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
-Write a thorough conclusion/summary section titled "{section.title}".
+Write a thorough conclusion/summary section titled "{section.title}".{part_instructions}
 
 CONTEXT INFORMATION:
 {context}
@@ -1773,6 +2015,7 @@ GUIDELINES:
 4. Suggest further reading or next steps for continued learning
 5. End with a compelling closing statement
 6. Format using proper markdown with headings, lists, and emphasis
+7. Make this summary comprehensive and detailed
 
 Write comprehensive content for the conclusion titled "{section.title}".
 """
@@ -1780,18 +2023,20 @@ Write comprehensive content for the conclusion titled "{section.title}".
         
         if "case study" in section_title_lower or "example" in section_title_lower:
             prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
-Create a detailed case study/example section titled "{section.title}".
+Create a detailed case study/example section titled "{section.title}".{part_instructions}
 
 CONTEXT INFORMATION:
 {context}
 
 GUIDELINES:
-1. Develop a realistic and relevant case study
+1. Develop multiple realistic and relevant case studies
 2. Connect theoretical concepts to practical application
 3. Provide detailed analysis and explanation
 4. Include lessons learned and key takeaways
 5. Format using proper markdown with headings, lists, and emphasis
 6. If appropriate, include diagrams or visual representations
+7. Make each case study comprehensive and in-depth
+8. DO NOT include unnecessary summaries or recaps
 
 Write comprehensive content for the case study titled "{section.title}".
 """
@@ -1799,25 +2044,27 @@ Write comprehensive content for the case study titled "{section.title}".
         
         if "exercise" in section_title_lower or "practice" in section_title_lower:
             prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
-Create a set of exercises and practice problems for the section titled "{section.title}".
+Create a set of exercises and practice problems for the section titled "{section.title}".{part_instructions}
 
 CONTEXT INFORMATION:
 {context}
 
 GUIDELINES:
-1. Create a variety of exercises that test understanding and application
+1. Create a large variety of exercises that test understanding and application
 2. Include a mix of easy, medium, and challenging problems
 3. Provide clear instructions for each exercise
 4. Include hints for more difficult problems
 5. Provide answer keys or solution guidelines
 6. Format using proper markdown with headings, lists, and emphasis
+7. Create more exercises than would typically be included
+8. DO NOT include unnecessary summaries or recaps
 
 Write comprehensive content for the exercises titled "{section.title}".
 """
             return prompt
         
         # Default to the standard prompt if no specific type is detected
-        return self._create_prompt(section, is_introduction, {"context": context})
+        return self._create_prompt(section, is_introduction, {"context": context}, part_number, total_parts)
 
 
 class ContentValidator:
