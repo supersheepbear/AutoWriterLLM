@@ -21,6 +21,11 @@ from unittest.mock import MagicMock
 import sys
 from openai import OpenAI
 import httpx
+from autowriterllm.review import ContentReviewer, ReviewFeedback
+from autowriterllm.interactive import InteractiveElementsGenerator, QuizQuestion, Exercise
+from autowriterllm.code_quality import CodeQualityAnalyzer, CodeAnalysis
+from autowriterllm.learning_path import LearningPathOptimizer, LearningObjective
+from autowriterllm.context_management import ContextManager, SemanticContextSearch
 
 # Create logs directory if it doesn't exist
 log_dir = Path("logs")
@@ -64,6 +69,20 @@ class Section:
     subsections: List[str]
     level: int
     parent: Optional[str] = None
+
+
+@dataclass
+class ChapterSummary:
+    """Stores summary information for a chapter.
+
+    Attributes:
+        title (str): Chapter title
+        summary (str): AI-generated summary of the chapter content
+        timestamp (float): When the summary was generated
+    """
+    title: str
+    summary: str
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -164,7 +183,7 @@ class ContentCache:
         try:
             cache_file = self.cache_dir / f"{key}.md"
             if cache_file.exists():
-                return cache_file.read_text()
+                return self._read_file_with_encoding(cache_file)
             return None
         except Exception as e:
             logger.error(f"Error reading from cache: {e}")
@@ -182,12 +201,32 @@ class ContentCache:
         """
         try:
             cache_file = self.cache_dir / f"{key}.md"
-            cache_file.write_text(content)
+            cache_file.write_text(content, encoding='utf-8')
             logger.debug(f"Content cached successfully: {key}")
             return True
         except Exception as e:
             logger.error(f"Failed to cache content: {e}")
             return False
+
+
+@dataclass
+class ConceptNode:
+    """Represents a concept in the knowledge graph."""
+    name: str
+    description: str
+    prerequisites: List[str]
+    related_concepts: List[str]
+
+class KnowledgeGraph:
+    """Maintains relationships between concepts across chapters."""
+    def __init__(self):
+        self.concepts: Dict[str, ConceptNode] = {}
+        
+    def add_concept(self, concept: ConceptNode) -> None:
+        self.concepts[concept.name] = concept
+        
+    def get_related_concepts(self, concept_name: str) -> List[str]:
+        return self.concepts[concept_name].related_concepts if concept_name in self.concepts else []
 
 
 class ContentGenerator:
@@ -247,6 +286,24 @@ class ContentGenerator:
         self.progress_var: Optional[tk.DoubleVar] = None
         self.attempt_label: Optional[ttk.Label] = None
         self.time_label: Optional[ttk.Label] = None
+
+        # Add new attribute for storing chapter summaries
+        self.chapter_summaries: Dict[str, ChapterSummary] = {}
+        
+        # Create summaries directory
+        self.summaries_dir = self.output_dir / "summaries"
+        self.summaries_dir.mkdir(exist_ok=True)
+        
+        # Load any existing summaries
+        self._load_existing_summaries()
+
+        self.knowledge_graph = KnowledgeGraph()
+
+        # Initialize new components
+        self.reviewer = ContentReviewer(self.client)
+        self.interactive_generator = InteractiveElementsGenerator(self.client)
+        self.code_analyzer = CodeQualityAnalyzer(self.client)
+        self.learning_path = LearningPathOptimizer(self.knowledge_graph)
 
     def _load_config(self) -> Dict:
         """Load configuration from config file.
@@ -312,6 +369,32 @@ class ContentGenerator:
             logger.error(f"Failed to initialize API client: {e}")
             raise
 
+    def _read_file_with_encoding(self, file_path: Path) -> str:
+        """Read file content with multiple encoding attempts.
+        
+        Args:
+            file_path: Path to the file to read
+            
+        Returns:
+            str: File content
+            
+        Raises:
+            UnicodeDecodeError: If file cannot be read with any encoding
+        """
+        encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'utf-16']
+        
+        for encoding in encodings:
+            try:
+                content = file_path.read_text(encoding=encoding)
+                logger.debug(f"Successfully read file {file_path} with {encoding} encoding")
+                return content
+            except UnicodeDecodeError:
+                continue
+                
+        raise UnicodeDecodeError(
+            f"Failed to read {file_path} with any of these encodings: {encodings}"
+        )
+
     def parse_toc(self) -> None:
         """Parse the table of contents markdown file.
         
@@ -324,13 +407,12 @@ class ContentGenerator:
             FileNotFoundError: If TOC file doesn't exist
             ValueError: If TOC file is empty or malformed
         """
-        logger.info("Starting to parse table of contents...")
         try:
             if not self.toc_file.exists():
                 logger.error(f"TOC file does not exist: {self.toc_file}")
                 raise FileNotFoundError(f"TOC file not found: {self.toc_file}")
 
-            content = self.toc_file.read_text()
+            content = self._read_file_with_encoding(self.toc_file)
             if not content.strip():
                 logger.warning("TOC file is empty or only contains whitespace.")
                 raise ValueError("TOC file is empty")
@@ -375,57 +457,205 @@ class ContentGenerator:
             logger.error(f"Error parsing TOC file: {str(e)}")
             raise
 
-    def generate_section_content(self, section: Section) -> Tuple[str, str]:
-        """Generate content for a section and all its subsections sequentially.
-
-        Args:
-            section: Section object containing title and subsections
-
-        Returns:
-            Tuple[str, str]: Generated content and filename
-
-        Raises:
-            ContentGenerationError: If content generation fails after all retries
-        """
-        logger.info(f"Generating content for main section: {section.title}")
-        
-        # Generate main section content
-        main_content = []
+    def _load_existing_summaries(self) -> None:
+        """Load previously generated chapter summaries."""
         try:
-            # Generate main section introduction
-            intro_prompt = self._create_prompt(section, is_introduction=True)
-            intro_content = self._generate_with_retry(intro_prompt)
-            main_content.append(f"# {section.title}\n\n{intro_content}\n")
-            logger.info(f"Generated introduction for {section.title}")
+            for summary_file in self.summaries_dir.glob("*.yaml"):
+                with open(summary_file) as f:
+                    data = yaml.safe_load(f)
+                    self.chapter_summaries[data["title"]] = ChapterSummary(**data)
+                    logger.debug(f"Loaded existing summary for: {data['title']}")
+        except Exception as e:
+            logger.error(f"Error loading existing summaries: {e}")
+
+    def _save_chapter_summary(self, title: str, summary: str) -> None:
+        """Save chapter summary to disk."""
+        try:
+            summary_obj = ChapterSummary(title=title, summary=summary)
+            self.chapter_summaries[title] = summary_obj
             
-            # Generate each subsection sequentially
-            for subsection in section.subsections:
-                logger.info(f"Generating content for subsection: {subsection}")
-                subsection_obj = Section(
-                    title=subsection,
-                    subsections=[],
-                    level=3,
-                    parent=section.title
-                )
-                
-                try:
-                    # Generate subsection content
-                    subsection_prompt = self._create_prompt(subsection_obj)
-                    subsection_content = self._generate_with_retry(subsection_prompt)
-                    main_content.append(f"## {subsection}\n\n{subsection_content}\n")
-                    logger.info(f"Successfully generated content for subsection: {subsection}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to generate subsection {subsection}: {e}")
-                    raise ContentGenerationError(f"Failed to generate subsection {subsection}: {e}")
-                
-            # Combine all content
-            full_content = "\n".join(main_content)
-            return full_content, self._create_filename(section)
+            # Save to file
+            summary_file = self.summaries_dir / f"{hashlib.md5(title.encode()).hexdigest()}.yaml"
+            with open(summary_file, 'w') as f:
+                yaml.dump(summary_obj.__dict__, f)
+            logger.debug(f"Saved summary for chapter: {title}")
+        except Exception as e:
+            logger.error(f"Error saving chapter summary: {e}")
+
+    def _get_chapter_summaries_context(self, current_section: Section) -> str:
+        """Get formatted context from all previous chapter summaries.
+        
+        Args:
+            current_section: The current section being generated
+            
+        Returns:
+            str: Formatted chapter summaries context
+        """
+        context_parts = []
+        
+        try:
+            # Find current chapter index
+            current_index = next(
+                (i for i, s in enumerate(self.sections) if s.title == current_section.title), 
+                -1
+            )
+            
+            # Get summaries for all previous chapters
+            for section in self.sections[:current_index]:
+                if summary := self.chapter_summaries.get(section.title):
+                    context_parts.append(f"\nChapter: {section.title}\nSummary: {summary.summary}")
+                else:
+                    # If no summary exists, try to generate one from the content file
+                    content_file = self.output_dir / self._create_filename(section)
+                    if content_file.exists():
+                        content = content_file.read_text(encoding='utf-8')
+                        summary = self._request_chapter_summary(section, content)
+                        context_parts.append(f"\nChapter: {section.title}\nSummary: {summary}")
+            
+            return "\n".join(context_parts)
             
         except Exception as e:
-            logger.error(f"Failed to generate content for section {section.title}: {e}")
-            raise ContentGenerationError(f"Failed to generate section {section.title}: {e}")
+            logger.error(f"Error getting chapter summaries context: {e}")
+            return "No previous chapter summaries available"
+
+    def _request_chapter_summary(self, section: Section, content: str) -> str:
+        """Request AI to generate a chapter summary."""
+        try:
+            summary_prompt = f"""Please provide a concise summary (2-3 sentences) of the following chapter content. 
+Focus on the main concepts and how they build upon previous chapters.
+
+Chapter: {section.title}
+
+Content:
+{content[:1000]}  # Using first 1000 chars for summary
+
+Generate a summary that will help maintain context between chapters."""
+
+            summary = self._generate_with_retry(summary_prompt)
+            return summary.strip()
+        except Exception as e:
+            logger.error(f"Error generating chapter summary: {e}")
+            return ""
+
+    def generate_section_content(self, section: Section) -> Tuple[str, str]:
+        """Generate content for a section.
+        
+        Args:
+            section: The section to generate content for
+            
+        Returns:
+            Tuple[str, str]: The generated content and filename
+        """
+        content_type = self._determine_tutorial_type()
+        
+        # Check if content is already cached
+        cache_key = None
+        if hasattr(self, 'cache'):
+            prompt = self._create_prompt(section)
+            cache_key = self.cache.get_cache_key(section, prompt)
+            cached_content = self.cache.get_cached_content(cache_key)
+            if cached_content:
+                logger.info(f"Using cached content for {section.title}")
+                filename = self._create_filename(section)
+                return cached_content, filename
+        
+        # Wait for rate limiting if needed
+        if hasattr(self, 'rate_limiter'):
+            self.rate_limiter.wait_if_needed()
+        
+        # Determine if this is an introduction
+        is_introduction = section.title.lower().startswith("introduction") or section.level == 1
+        
+        # Create prompt with context
+        prompt = self._create_prompt(section, is_introduction)
+        
+        # Generate content
+        try:
+            content = self._generate_with_retry(prompt)
+            
+            # Improve content quality
+            if hasattr(self, 'code_analyzer') and content_type == "programming":
+                analysis = self.code_analyzer.analyze_code(content)
+                content = self._improve_code_sections(content, analysis)
+            
+            if hasattr(self, 'content_analyzer'):
+                analysis = self.content_analyzer.analyze_content(content, content_type)
+                # Implement content improvement based on analysis
+            
+            if hasattr(self, 'reviewer'):
+                review = self.reviewer.review_content(content, section.title, content_type)
+                content = self._improve_content_based_on_review(content, review, content_type)
+            
+            # Add interactive elements if appropriate
+            if hasattr(self, 'interactive_generator'):
+                if "exercise" in section.title.lower() or "practice" in section.title.lower():
+                    exercises = self.interactive_generator.generate_exercises(content, "intermediate", content_type)
+                    quiz_questions = self.interactive_generator.generate_quiz(content, "medium", content_type)
+                    content = self._add_interactive_elements(content, quiz_questions, exercises)
+            
+            # Add learning objectives if appropriate
+            if hasattr(self, 'learning_path_optimizer'):
+                objectives = self.learning_path_optimizer.generate_learning_objectives(section, content_type)
+                prerequisites = self.learning_path_optimizer.suggest_prerequisites(section, content_type)
+                content = self._add_learning_metadata(content, objectives, prerequisites)
+            
+            # Update knowledge graph
+            self._update_knowledge_graph(section, content)
+            
+            # Generate chapter summary
+            if not section.parent:  # If it's a main chapter
+                summary = self._request_chapter_summary(section, content)
+                self._save_chapter_summary(section.title, summary)
+            
+            # Cache the content
+            if hasattr(self, 'cache') and cache_key:
+                self.cache.cache_content(cache_key, content)
+            
+            # Create filename
+            filename = self._create_filename(section)
+            
+            # Add to vector database for context
+            self._add_to_vector_db(filename, content)
+            
+            return content, filename
+        except Exception as e:
+            logger.error(f"Error generating content for {section.title}: {e}")
+            raise ContentGenerationError(f"Failed to generate content for {section.title}: {str(e)}")
+
+    def _load_all_previous_content(self, current_section: Section) -> Dict[str, str]:
+        """Load content from all previous sections.
+        
+        Args:
+            current_section: The current section being generated
+            
+        Returns:
+            Dict mapping section titles to their content
+        """
+        previous_content = {}
+        
+        try:
+            # Find current section index
+            current_index = next(
+                (i for i, s in enumerate(self.sections) if s.title == current_section.title), 
+                -1
+            )
+            
+            # Load content from all previous sections
+            for section in self.sections[:current_index]:
+                content_file = self.output_dir / self._create_filename(section)
+                if content_file.exists():
+                    try:
+                        content = content_file.read_text(encoding='utf-8')
+                        previous_content[section.title] = content
+                        logger.debug(f"Loaded content from: {section.title}")
+                    except Exception as e:
+                        logger.warning(f"Could not read content for {section.title}: {e}")
+            
+            return previous_content
+            
+        except Exception as e:
+            logger.error(f"Error loading previous content: {e}")
+            return {}
 
     def _get_context_using_vectors(self, section: Section) -> str:
         """Get context using vector similarity search."""
@@ -439,188 +669,318 @@ class ContentGenerator:
             logger.info(f"Using vector database at: {db_path}")
 
             # Initialize ChromaDB with persistent storage
-            client = chromadb.Client(
-                Settings(
-                    is_persistent=True,
-                    persist_directory=str(db_path),
-                    anonymized_telemetry=False,
-                )
-            )
+            client = chromadb.Client(Settings(
+                is_persistent=True,
+                persist_directory=str(db_path),
+                anonymized_telemetry=False,
+            ))
 
-            # Use consistent collection name
             collection_name = "sections"
             
-            # Create or get collection
             try:
                 collection = client.get_collection(collection_name)
                 logger.info(f"Using existing collection: {collection_name}")
             except Exception:
                 logger.info(f"Creating new collection: {collection_name}")
-                collection = client.create_collection(collection_name)
-
-            # Get current section index and level
-            current_index = next(
-                (i for i, s in enumerate(self.sections) if s.title == section.title), -1
-            )
-            
-            # For subsections, include the parent section's content
-            if section.parent:
-                parent_index = next(
-                    (i for i, s in enumerate(self.sections) if s.title == section.parent), -1
+                collection = client.create_collection(
+                    name=collection_name,
+                    metadata={"hnsw:space": "cosine"}  # Use cosine similarity
                 )
-                if parent_index >= 0:
-                    logger.info(f"Found parent section: {section.parent}")
-                    parent_file = self.output_dir / self._create_filename(self.sections[parent_index])
-                    if parent_file.exists():
-                        parent_content = parent_file.read_text()
-                        collection.add(
-                            documents=[parent_content],
-                            metadatas=[{"title": section.parent}],
-                            ids=[f"parent_{section.parent}"]
+
+            # Get current chapter number
+            current_chapter = int(section.title.split('.')[0])
+            
+            # Index content from previous chapters
+            indexed_count = 0
+            for prev_section in self.sections:
+                prev_chapter = int(prev_section.title.split('.')[0])
+                if prev_chapter >= current_chapter:
+                    break
+                
+                file_path = self.output_dir / self._create_filename(prev_section)
+                if file_path.exists():
+                    try:
+                        content = file_path.read_text(encoding='utf-8')
+                        collection.upsert(
+                            ids=[prev_section.title],
+                            documents=[content],
+                            metadatas=[{
+                                "title": prev_section.title,
+                                "chapter": prev_chapter
+                            }]
                         )
-                        logger.info(f"Added parent section content to context: {section.parent}")
+                        indexed_count += 1
+                        logger.debug(f"Indexed content for: {prev_section.title}")
+                    except Exception as e:
+                        logger.error(f"Error indexing {prev_section.title}: {e}")
 
-            # Only index sections that come before the current one
-            if current_index > 0:
-                # Get list of existing document IDs
-                try:
-                    existing_ids = {doc["id"] for doc in collection.get()["ids"]}
-                except Exception:
-                    existing_ids = set()
-                    logger.debug("No existing documents found")
-
-                # Index previous sections if not already indexed
-                indexed_count = 0
-                for prev_section in self.sections[:current_index]:
-                    section_id = f"{prev_section.title}"
-                    
-                    if section_id not in existing_ids:
-                        # Generate content for indexing if file exists
-                        file_path = self.output_dir / self._create_filename(prev_section)
-                        if file_path.exists():
-                            content = file_path.read_text()
-                            collection.add(
-                                documents=[content],
-                                metadatas=[{"title": prev_section.title}],
-                                ids=[section_id]
-                            )
-                            indexed_count += 1
-                            logger.info(f"Indexed previous section: {prev_section.title}")
-
-                logger.info(f"Indexed {indexed_count} previous sections for context search")
-
-                # Only query if we have indexed documents
-                if indexed_count > 0:
-                    results = collection.query(
-                        query_texts=[section.title],
-                        n_results=min(2, indexed_count)
-                    )
-
-                    if results and results["documents"] and results["documents"][0]:
-                        context_sections = []
-                        for doc, metadata in zip(results["documents"][0], results["metadatas"][0]):
-                            # Extract key points (last 500 chars) from each relevant section
-                            context = f"\nContext from {metadata['title']}:\n{doc[-500:]}"
-                            context_sections.append(context)
-                            logger.debug(f"Added context from: {metadata['title']}")
+            # Query with chapter-aware filtering
+            if indexed_count > 0:
+                results = collection.query(
+                    query_texts=[section.title],
+                    n_results=min(3, indexed_count),
+                    where={"chapter": {"$lt": current_chapter}},
+                    include=["documents", "metadatas", "distances"]
+                )
+                
+                if results and results["documents"] and results["documents"][0]:
+                    context_parts = []
+                    for doc, metadata, distance in zip(
+                        results["documents"][0],
+                        results["metadatas"][0],
+                        results["distances"][0]
+                    ):
+                        # Extract most relevant part (last 500 chars)
+                        relevant_content = doc[-500:] if len(doc) > 500 else doc
+                        similarity_score = 1 - distance  # Convert distance to similarity
                         
-                        return "\n\n".join(context_sections)
+                        if similarity_score > 0.3:  # Only include if somewhat relevant
+                            context = (
+                                f"\nContext from {metadata['title']} "
+                                f"(similarity: {similarity_score:.2f}):\n{relevant_content}"
+                            )
+                            context_parts.append(context)
+                            logger.debug(
+                                f"Added context from {metadata['title']} "
+                                f"with similarity {similarity_score:.2f}"
+                            )
                     
-                    logger.info("No relevant context found in previous sections")
-                    return ""
-                else:
-                    logger.info("No previous sections available for context")
-                    return ""
+                    if context_parts:
+                        return "\n\n".join(context_parts)
+                    else:
+                        logger.info("No sufficiently relevant context found")
+                        return ""
+                        
             else:
                 logger.info("First section - no previous context needed")
                 return ""
 
         except Exception as e:
-            logger.error(f"Error getting vector context: {e}", exc_info=True)
+            logger.error(f"Error in vector search: {e}", exc_info=True)
             return ""
 
     def _determine_tutorial_type(self) -> str:
-        """Determine the tutorial context from the summary file.
-
-        Looks for context in the summary file that should be in the same directory
-        as the table of contents file, with the same name but _summary suffix.
-
+        """Determine the type of content being generated.
+        
         Returns:
-            str: Description of the tutorial context
+            str: The content type (e.g., 'programming', 'science', 'history', etc.)
         """
         try:
-            # Construct summary file path
-            summary_file = self.toc_file.parent / f"{self.toc_file.stem}_summary.md"
+            # Try to infer from the table of contents
+            toc_content = self._read_file_with_encoding(self.toc_file)
             
-            if not summary_file.exists():
-                logger.warning(f"Summary file not found: {summary_file}")
-                return ""
-
-            content = summary_file.read_text()
-            logger.info(f"Found summary file: {summary_file}")
+            # Look for keywords in the TOC to determine the type
+            content_types = {
+                'programming': ['code', 'programming', 'function', 'class', 'algorithm', 'development'],
+                'science': ['experiment', 'theory', 'hypothesis', 'research', 'scientific'],
+                'mathematics': ['theorem', 'proof', 'equation', 'calculation', 'formula'],
+                'history': ['century', 'era', 'period', 'historical', 'timeline'],
+                'literature': ['novel', 'poetry', 'author', 'literary', 'character'],
+                'business': ['management', 'strategy', 'marketing', 'finance', 'economics'],
+                'arts': ['painting', 'sculpture', 'composition', 'design', 'artistic'],
+                'medicine': ['diagnosis', 'treatment', 'patient', 'clinical', 'medical'],
+                'philosophy': ['ethics', 'metaphysics', 'philosophy', 'reasoning', 'logic'],
+                'language': ['grammar', 'vocabulary', 'pronunciation', 'linguistic', 'syntax']
+            }
             
-            # Return the entire summary content as context
-            return content.strip()
-
+            # Count occurrences of keywords
+            type_scores = {category: 0 for category in content_types}
+            for category, keywords in content_types.items():
+                for keyword in keywords:
+                    type_scores[category] += toc_content.lower().count(keyword.lower())
+            
+            # Get the category with the highest score
+            if any(type_scores.values()):
+                content_type = max(type_scores.items(), key=lambda x: x[1])[0]
+                logger.info(f"Detected content type: {content_type}")
+                return content_type
+            
+            # Default to generic if no clear type is detected
+            return "generic"
         except Exception as e:
-            logger.warning(f"Error reading summary file: {e}")
-            return ""
+            logger.warning(f"Error determining tutorial type: {e}")
+            return "generic"
 
-    def _create_prompt(self, section: Section, is_introduction: bool = False) -> str:
-        """Create a prompt with proper context."""
-        # Get context from previous sections
-        vector_context = self._get_context_using_vectors(section)
+    def _create_prompt(self, section: Section, is_introduction: bool = False, 
+                      context: Dict[str, Any] = None) -> str:
+        """Create a prompt for content generation.
         
-        # Get tutorial type and summary context
-        tutorial_context = self._determine_tutorial_type()
+        Args:
+            section: The section to generate content for
+            is_introduction: Whether this is an introduction section
+            context: Additional context information
+            
+        Returns:
+            str: The prompt for the AI
+        """
+        content_type = self._determine_tutorial_type()
+        
+        # Get context from previous sections
+        previous_context = self._get_immediate_previous_context(section)
+        
+        # Get context from vector database if available
+        vector_context = ""
+        if hasattr(self, 'context_manager') and self.context_manager:
+            vector_context = self._get_context_using_vectors(section)
         
         # Combine contexts
-        context = f"""Tutorial Type: {tutorial_context}
-
-Previous Content Context:
-{vector_context}"""
-
+        combined_context = f"{previous_context}\n\n{vector_context}".strip()
+        
+        # Create specific prompt based on content type
         if is_introduction:
-            prompt = f"""Write an introduction for the section '{section.title}'.
+            return self._create_specific_prompt(section, combined_context, is_introduction)
+        
+        # Base prompt structure
+        prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
+Write the content for the section titled "{section.title}".
 
-{context}
+CONTEXT INFORMATION:
+{combined_context}
 
-This introduction should:
-1. Provide an overview of {section.title}
-2. Explain why this topic is important
-3. Build upon concepts from previous sections where relevant
-4. Outline what will be covered in the subsections:
-{chr(10).join(f'- {sub}' for sub in section.subsections)}
+GUIDELINES:
+1. Write detailed, accurate, and educational content
+2. Use clear explanations with examples
+3. Include relevant diagrams, tables, or illustrations (described in markdown)
+4. Add practical examples where appropriate
+5. Include section summaries and key takeaways
+6. Format using proper markdown with headings, lists, and emphasis
+7. Ensure content is engaging and accessible to the target audience
+"""
 
-Format the response in markdown."""
-        else:
-            prompt = f"""Write a detailed tutorial subsection about '{section.title}'.
-Parent section: {section.parent}
-
-{context}
-
-Requirements for code examples:
-1. Use Python 3.12 and follow Python community best practices
-2. Include comprehensive logging and error handling
-3. Handle edge cases, invalid inputs, and unusual scenarios
-4. Optimize performance while maintain clarity
-5. Use type hints for all variables and functions
-6. Provide Google-style docstrings with examples for Sphinx documentation
-
-For each code example:
-- Include detailed explanations of the code
-- Explain design decisions and trade-offs
-- Highlight best practices and common pitfalls
-- Show both basic and advanced usage patterns
-- Reference and build upon concepts from previous sections
-
-At the end of the subsection, include:
-1. Practice exercises specific to this subsection
-2. Key takeaways and summary
-
-Format the response in markdown, using appropriate headers and code blocks."""
-
+        # Add content-specific guidelines based on the type
+        if content_type == "programming":
+            prompt += """
+8. Include well-commented code examples
+9. Explain algorithms and data structures clearly
+10. Cover best practices and common pitfalls
+11. Include debugging tips and performance considerations
+"""
+        elif content_type == "science":
+            prompt += """
+8. Include scientific principles and theories
+9. Explain experimental methods and results
+10. Reference important studies and findings
+11. Include diagrams of scientific processes
+"""
+        elif content_type == "mathematics":
+            prompt += """
+8. Include clear mathematical notation using LaTeX
+9. Provide step-by-step derivations of formulas
+10. Include visual representations of mathematical concepts
+11. Provide practice problems with solutions
+"""
+        elif content_type == "history":
+            prompt += """
+8. Include accurate dates and chronology
+9. Provide context for historical events
+10. Include perspectives from different historical sources
+11. Connect historical events to broader themes
+"""
+        elif content_type == "literature":
+            prompt += """
+8. Include analysis of literary techniques
+9. Provide examples from important texts
+10. Discuss cultural and historical context of works
+11. Include biographical information about key authors
+"""
+        elif content_type == "business":
+            prompt += """
+8. Include case studies of real businesses
+9. Provide practical frameworks and models
+10. Include market analysis and trends
+11. Discuss ethical considerations in business
+"""
+        elif content_type == "arts":
+            prompt += """
+8. Include descriptions of artistic techniques
+9. Provide historical context for artistic movements
+10. Include analysis of notable works
+11. Discuss the cultural impact of art
+"""
+        elif content_type == "medicine":
+            prompt += """
+8. Include accurate medical terminology
+9. Describe diagnostic criteria and treatment protocols
+10. Include anatomical diagrams and illustrations
+11. Discuss current research and evidence-based practices
+"""
+        elif content_type == "philosophy":
+            prompt += """
+8. Include clear explanations of philosophical concepts
+9. Provide historical context for philosophical ideas
+10. Present different perspectives on philosophical questions
+11. Include thought experiments and logical arguments
+"""
+        elif content_type == "language":
+            prompt += """
+8. Include examples of language usage
+9. Provide clear explanations of grammatical rules
+10. Include pronunciation guides where relevant
+11. Discuss cultural aspects of language
+"""
+        
+        # Add section-specific instructions
+        if "exercise" in section.title.lower() or "practice" in section.title.lower():
+            prompt += """
+ADDITIONAL INSTRUCTIONS:
+- Create practical exercises for readers to apply what they've learned
+- Include a mix of easy, medium, and challenging exercises
+- Provide hints for difficult exercises
+- Include answer keys or solution guidelines
+"""
+        
+        if "summary" in section.title.lower() or "conclusion" in section.title.lower():
+            prompt += """
+ADDITIONAL INSTRUCTIONS:
+- Summarize the key points covered in the chapter
+- Reinforce the most important concepts
+- Connect the material to the broader subject
+- Suggest further reading or next steps
+"""
+        
+        if "case study" in section.title.lower() or "example" in section.title.lower():
+            prompt += """
+ADDITIONAL INSTRUCTIONS:
+- Provide a detailed, realistic case study
+- Connect theoretical concepts to practical application
+- Include analysis and lessons learned
+- Suggest how readers can apply similar approaches
+"""
+        
+        prompt += f"""
+Write comprehensive content for the section titled "{section.title}".
+"""
+        
         return prompt
+
+    def _get_immediate_previous_context(self, section: Section) -> str:
+        """Get context from immediately preceding section."""
+        try:
+            current_index = next(
+                (i for i, s in enumerate(self.sections) if s.title == section.title),
+                -1
+            )
+            
+            if current_index > 0:
+                prev_section = self.sections[current_index - 1]
+                prev_file = self.output_dir / self._create_filename(prev_section)
+                
+                if prev_file.exists():
+                    content = self._read_file_with_encoding(prev_file)
+                    # Extract conclusion or summary section if present
+                    summary_match = re.search(r'#+\s*(?:Summary|Conclusion).*?\n(.*?)(?:\n#|$)', 
+                                            content, re.DOTALL)
+                    if summary_match:
+                        return summary_match.group(1).strip()
+                    # Otherwise return last paragraph
+                    paragraphs = content.split('\n\n')
+                    return paragraphs[-1].strip()
+                    
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Error getting immediate previous context: {e}")
+            return ""
 
     def _create_filename(self, section: Section) -> str:
         """Create a filename for the section content.
@@ -708,7 +1068,9 @@ Format the response in markdown, using appropriate headers and code blocks."""
                 
                 # Generate each subsection with updated context
                 for subsection in section.subsections:
-                    subsection_file = self.output_dir / self._create_filename(Section(title=subsection, subsections=[], level=3, parent=section.title))
+                    subsection_file = self.output_dir / self._create_filename(
+                        Section(title=subsection, subsections=[], level=3, parent=section.title)
+                    )
                     if subsection_file.exists():
                         logger.info(f"Skipping already generated subsection: {subsection}")
                         completed_units += 1
@@ -797,80 +1159,57 @@ Format the response in markdown, using appropriate headers and code blocks."""
             logger.error(f"Failed to add content to vector database: {e}")
 
     def _create_book_planning_prompt(self, user_input: str) -> str:
-        """Create a detailed prompt from minimal user input.
+        """Create a prompt for generating a book plan.
         
         Args:
-            user_input: Basic user request for content generation
+            user_input: User's description of the book they want to create
             
         Returns:
-            str: Detailed prompt for the AI model
+            str: The prompt for the AI
         """
-        # Parse level and topic from user input
-        level = "beginner"
+        # Extract key information from user input
+        topic_match = re.search(r'(create|generate|write|make)\s+(\w+)\s+(.*?)\s+(book|guide|tutorial|textbook)', 
+                              user_input.lower())
+        
+        level = "intermediate"
         topic = user_input
-        if "level" in user_input.lower():
-            parts = user_input.lower().split("level")
-            topic = parts[0].strip()
-            level = parts[1].strip()
+        
+        if topic_match:
+            level = topic_match.group(2)
+            topic = topic_match.group(3)
+        
+        prompt = f"""You are an expert author and educator. Create a detailed plan for a {level} level textbook on "{topic}".
 
-        system_prompt = """Please generate two markdown files in EXACTLY this format:
+TASK:
+1. Generate a comprehensive table of contents with chapters and subsections
+2. Create a book summary that explains the purpose, target audience, and prerequisites
+
+GUIDELINES:
+1. The table of contents should be well-structured and logical
+2. Include 5-10 main chapters with 3-5 subsections each
+3. Cover fundamentals through advanced topics in a progressive sequence
+4. Include practical examples, case studies, and exercises
+5. Consider the {level} level of the target audience
+6. Make sure the content is comprehensive and educational
+
+FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:
 
 ```markdown:table_of_contents.md
-# [Topic Name]
-
-## 1. [Chapter Title]
-### 1.1 [Section Title]
-### 1.2 [Section Title]
-
-## 2. [Chapter Title]
-### 2.1 [Section Title]
-### 2.2 [Section Title]
-[etc...]
+# Book Title
+## 1. Chapter Title
+### 1.1 Section Title
+### 1.2 Section Title
+## 2. Chapter Title
+...
 ```
 
 ```markdown:book_summary.md
-# [Topic Name]
-
-## Overview
-[Overview content]
-
-## Target Audience
-- [Audience point 1]
-- [Audience point 2]
-
-## Prerequisites
-- [Prerequisite 1]
-- [Prerequisite 2]
-
-## Learning Objectives
-By the end of this guide, readers will be able to:
-1. [Objective 1]
-2. [Objective 2]
-
-## Technical Requirements
-- [Requirement 1]
-- [Requirement 2]
-
-## Estimated Completion Time
-- Total Hours: [X]
-- Recommended Pace: [Y]
+[Write a 3-5 paragraph summary of the book here, including purpose, audience, and prerequisites]
 ```
 
-The content should follow these requirements:
-1. Progress from fundamentals to advanced concepts
-2. Include practical examples and exercises
-3. Cover best practices and common pitfalls
-4. Include real-world applications
-5. Provide clear learning objectives for each section"""
-
-        prompt = f"""System: {system_prompt}
-
-User Request: Create a {level} level guide about {topic}.
-
-Please generate a comprehensive learning plan following the EXACT format shown above.
-The content should be suitable for {level} learners while still providing clear progression
-to advanced concepts."""
-
+Do not include any other text in your response besides these two markdown code blocks.
+"""
+        
         return prompt
 
     def _parse_ai_response(self, content: str) -> Tuple[str, str]:
@@ -1106,22 +1445,379 @@ to advanced concepts."""
         return True
 
     def _safe_file_write(self, file_path: Path, content: str) -> bool:
-        """Safely write content to file with error handling."""
+        """Safely write content to file with error handling.
+        
+        Args:
+            file_path: Path to write to
+            content: Content to write
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
         try:
-            # Create backup of existing file if it exists
+            # Create parent directories if they don't exist
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create backup if file exists
             if file_path.exists():
                 backup_path = file_path.with_suffix(f".bak_{int(time.time())}")
                 file_path.rename(backup_path)
                 logger.info(f"Created backup: {backup_path}")
             
             # Write new content
-            file_path.write_text(content)
+            file_path.write_text(content, encoding='utf-8')
             logger.info(f"Successfully wrote file: {file_path}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to write file {file_path}: {e}")
+            logger.error(f"Error writing file {file_path}: {e}")
             return False
+
+    def _extract_key_concepts(self, content: str) -> List[ConceptNode]:
+        """Extract key concepts from generated content."""
+        concept_prompt = f"""Analyze this content and identify key concepts:
+{content[:2000]}
+
+For each concept, provide:
+1. Concept name
+2. Brief description
+3. Required prerequisites
+4. Related concepts
+
+Format as YAML."""
+        
+        try:
+            concepts_yaml = self._generate_with_retry(concept_prompt)
+            concepts_data = yaml.safe_load(concepts_yaml)
+            return [ConceptNode(**concept) for concept in concepts_data]
+        except Exception as e:
+            logger.error(f"Failed to extract concepts: {e}")
+            return []
+
+    def _update_knowledge_graph(self, section: Section, content: str) -> None:
+        """Update the knowledge graph with concepts from the content.
+        
+        Args:
+            section: The section being processed
+            content: The content to extract concepts from
+        """
+        content_type = self._determine_tutorial_type()
+        try:
+            concepts = self._extract_key_concepts(content)
+            for concept in concepts:
+                self.knowledge_graph.add_concept(concept)
+        except Exception as e:
+            logger.error(f"Failed to update knowledge graph: {e}")
+
+    def _improve_code_sections(self, content: str, analysis: CodeAnalysis) -> str:
+        """Improve code sections based on analysis.
+        
+        Args:
+            content: The content containing code sections
+            analysis: Code analysis results
+            
+        Returns:
+            str: Improved content
+        """
+        if not analysis.suggestions:
+            return content
+        
+        # Log improvement suggestions
+        logger.info(f"Improving code sections with {len(analysis.suggestions)} suggestions")
+        
+        # Create a prompt for improving the code
+        prompt = f"""Improve the following content based on these suggestions:
+
+CONTENT:
+{content[:3000]}
+
+SUGGESTIONS:
+{chr(10).join(f'- {suggestion}' for suggestion in analysis.suggestions)}
+
+Return the improved content with the same structure but better code examples.
+"""
+        
+        try:
+            improved_content = self._generate_with_retry(prompt)
+            return improved_content
+        except Exception as e:
+            logger.error(f"Failed to improve code sections: {e}")
+            return content
+
+    def _improve_content_based_on_review(self, content: str, review: ReviewFeedback, content_type: str = "generic") -> str:
+        """Improve content based on review feedback.
+        
+        Args:
+            content: The content to improve
+            review: Review feedback
+            content_type: Type of content
+            
+        Returns:
+            str: Improved content
+        """
+        if not review.suggested_improvements:
+            return content
+        
+        # Log improvement suggestions
+        logger.info(f"Improving content with {len(review.suggested_improvements)} suggestions")
+        
+        # Create a prompt for improving the content
+        prompt = f"""Improve the following {content_type} textbook content based on these suggestions:
+
+CONTENT:
+{content[:3000]}
+
+SUGGESTIONS:
+{chr(10).join(f'- {suggestion}' for suggestion in review.suggested_improvements)}
+
+SCORES:
+- Technical accuracy: {review.technical_accuracy}
+- Clarity: {review.clarity}
+- Completeness: {review.completeness}
+
+Return the improved content with the same structure but addressing the suggestions.
+"""
+        
+        try:
+            improved_content = self._generate_with_retry(prompt)
+            return improved_content
+        except Exception as e:
+            logger.error(f"Failed to improve content based on review: {e}")
+            return content
+
+    def _add_interactive_elements(self, content: str, 
+                            quiz_questions: List[QuizQuestion],
+                            exercises: List[Exercise]) -> str:
+        """Add interactive elements to content."""
+        try:
+            quiz_section = "\n\n## Quiz Questions\n\n"
+            for i, question in enumerate(quiz_questions, 1):
+                quiz_section += f"{i}. {question.question}\n"
+                for option in question.options:
+                    quiz_section += f"   - {option}\n"
+                quiz_section += f"\nExplanation: {question.explanation}\n\n"
+            
+            exercise_section = "\n\n## Practical Exercises\n\n"
+            for i, exercise in enumerate(exercises, 1):
+                exercise_section += f"### Exercise {i}: {exercise.title}\n\n"
+                exercise_section += f"{exercise.description}\n\n"
+                exercise_section += "Steps:\n"
+                for step in exercise.steps:
+                    exercise_section += f"1. {step}\n"
+                exercise_section += f"\nExpected Outcome: {exercise.expected_outcome}\n\n"
+            
+            return content + quiz_section + exercise_section
+        except Exception as e:
+            logger.error(f"Failed to add interactive elements: {e}")
+            return content
+
+    def _add_learning_metadata(self, content: str,
+                         objectives: List[LearningObjective],
+                         prerequisites: List[str]) -> str:
+        """Add learning objectives and prerequisites to content."""
+        try:
+            metadata = "## Learning Objectives\n\n"
+            for objective in objectives:
+                metadata += f"- {objective.description}\n"
+            
+            metadata += "\n## Prerequisites\n\n"
+            for prereq in prerequisites:
+                metadata += f"- {prereq}\n"
+            
+            return metadata + "\n\n" + content
+        except Exception as e:
+            logger.error(f"Failed to add learning metadata: {e}")
+            return content
+
+    def _create_hierarchical_context(self, section: Section) -> str:
+        """Create a hierarchical context for the current section."""
+        context_parts = []
+        
+        # Find current chapter index
+        current_index = next(
+            (i for i, s in enumerate(self.sections) if s.title == section.title), -1
+        )
+        
+        # Get summaries for all previous chapters
+        for section in self.sections[:current_index]:
+            if summary := self.chapter_summaries.get(section.title):
+                context_parts.append(f"\nChapter: {section.title}\nSummary: {summary.summary}")
+        
+        return "\n".join(context_parts)
+
+    def _combine_context(self, *contexts: str) -> str:
+        """Combine multiple context strings intelligently."""
+        combined_context = ""
+        for context in contexts:
+            if context:
+                combined_context += context + "\n\n"
+        return combined_context.strip()
+
+    def _generate_with_context(self, section: Section, context: str) -> str:
+        """Generate content with enhanced context."""
+        try:
+            prompt = self._create_prompt(section, context=context)
+            return self._generate_with_retry(prompt)
+        except Exception as e:
+            logger.error(f"Failed to generate content with context: {e}")
+            raise ContentGenerationError(f"Failed to generate content with context: {e}")
+
+    def _get_parent_context(self, section: Section) -> str:
+        """Get comprehensive context from parent section."""
+        if not section.parent:
+            return ""
+        
+        try:
+            parent_file = self.output_dir / self._create_filename(
+                next(s for s in self.sections if s.title == section.parent)
+            )
+            if parent_file.exists():
+                content = self._read_file_with_encoding(parent_file)
+                # Extract key points from parent content
+                key_points = self._extract_key_points(content)
+                return f"\nParent Section Context ({section.parent}):\n{key_points}"
+        except Exception as e:
+            logger.error(f"Error getting parent context: {e}")
+        
+        return ""
+
+    def _extract_key_points(self, content: str, max_points: int = 3) -> str:
+        """Extract key points from content."""
+        # Split into paragraphs and find those starting with important markers
+        paragraphs = content.split('\n\n')
+        key_points = []
+        
+        for para in paragraphs:
+            if any(marker in para.lower() for marker in 
+                ['important', 'key', 'note', 'remember', 'essential']):
+                key_points.append(para)
+                
+        return "\n".join(key_points[:max_points])
+
+    def _create_basic_prompt(self, section: Section, context: str) -> str:
+        """Create a basic prompt for content generation.
+        
+        Args:
+            section: Section to generate content for
+            context: Full context string
+            
+        Returns:
+            str: Complete prompt with instructions
+        """
+        return f"""{context}
+
+Write a comprehensive tutorial section about '{section.title}'.
+
+Requirements:
+1. Build directly on concepts from previous chapters
+2. Maintain consistent terminology and approach
+3. Reference specific examples or concepts from earlier chapters where relevant
+
+Content structure:
+1. Clear introduction and overview
+2. Detailed explanations with examples
+3. Common pitfalls and solutions
+4. Practice exercises or key takeaways
+5. Summary connecting to overall learning path
+
+Format the response in markdown."""
+
+    def _create_specific_prompt(self, section: Section, context: str, 
+                              is_introduction: bool) -> str:
+        """Create a specific prompt based on section type.
+        
+        Args:
+            section: The section to generate content for
+            context: Context information
+            is_introduction: Whether this is an introduction section
+            
+        Returns:
+            str: The specialized prompt
+        """
+        content_type = self._determine_tutorial_type()
+        
+        if is_introduction:
+            prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
+Write an engaging introduction chapter titled "{section.title}".
+
+CONTEXT INFORMATION:
+{context}
+
+GUIDELINES:
+1. Write a compelling introduction that hooks the reader
+2. Explain the importance and relevance of the subject
+3. Provide an overview of what will be covered in the book
+4. Set clear expectations for the reader
+5. Explain who the target audience is and what prerequisites are needed
+6. Use accessible language and engaging examples
+7. Format using proper markdown with headings, lists, and emphasis
+
+Write comprehensive content for the introduction titled "{section.title}".
+"""
+            return prompt
+        
+        # Check for specific section types
+        section_title_lower = section.title.lower()
+        
+        if "conclusion" in section_title_lower or "summary" in section_title_lower:
+            prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
+Write a thorough conclusion/summary section titled "{section.title}".
+
+CONTEXT INFORMATION:
+{context}
+
+GUIDELINES:
+1. Summarize the key points covered in the chapter/book
+2. Reinforce the most important concepts and takeaways
+3. Connect the material to practical applications
+4. Suggest further reading or next steps for continued learning
+5. End with a compelling closing statement
+6. Format using proper markdown with headings, lists, and emphasis
+
+Write comprehensive content for the conclusion titled "{section.title}".
+"""
+            return prompt
+        
+        if "case study" in section_title_lower or "example" in section_title_lower:
+            prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
+Create a detailed case study/example section titled "{section.title}".
+
+CONTEXT INFORMATION:
+{context}
+
+GUIDELINES:
+1. Develop a realistic and relevant case study
+2. Connect theoretical concepts to practical application
+3. Provide detailed analysis and explanation
+4. Include lessons learned and key takeaways
+5. Format using proper markdown with headings, lists, and emphasis
+6. If appropriate, include diagrams or visual representations
+
+Write comprehensive content for the case study titled "{section.title}".
+"""
+            return prompt
+        
+        if "exercise" in section_title_lower or "practice" in section_title_lower:
+            prompt = f"""You are an expert author writing a comprehensive textbook on {content_type}.
+Create a set of exercises and practice problems for the section titled "{section.title}".
+
+CONTEXT INFORMATION:
+{context}
+
+GUIDELINES:
+1. Create a variety of exercises that test understanding and application
+2. Include a mix of easy, medium, and challenging problems
+3. Provide clear instructions for each exercise
+4. Include hints for more difficult problems
+5. Provide answer keys or solution guidelines
+6. Format using proper markdown with headings, lists, and emphasis
+
+Write comprehensive content for the exercises titled "{section.title}".
+"""
+            return prompt
+        
+        # Default to the standard prompt if no specific type is detected
+        return self._create_prompt(section, is_introduction, {"context": context})
 
 
 class ContentValidator:
@@ -1446,7 +2142,7 @@ class ContentGeneratorGUI:
                         self.model_var.set(self.models[provider][0])
                         logger.info(f"Using default model: {self.models[provider][0]}")
 
-                self.update_log("Configuration loaded successfully")
+            self.update_log("Configuration loaded successfully")
                 
         except Exception as e:
             error_msg = f"Error loading configuration: {e}"
@@ -1671,9 +2367,9 @@ class ContentGeneratorGUI:
             
             logger.info(f"Starting book plan generation for topic: '{topic}' at {level} level")
             
-            if not self._validate_topic_input(topic):
-                logger.warning(f"Topic validation failed for: '{topic}'")
-                return
+            #if not self._validate_topic_input(topic):
+                #logger.warning(f"Topic validation failed for: '{topic}'")
+                #return
             
             self._disable_inputs()
             self.update_log(f"Generating book plan for {topic} at {level} level...")
@@ -1709,8 +2405,8 @@ class ContentGeneratorGUI:
                         logger.info(f"Created backup: {backup_path}")
                 
                 # Write new files
-                toc_file.write_text(toc_content)
-                summary_file.write_text(summary_content)
+                toc_file.write_text(toc_content, encoding='utf-8')
+                summary_file.write_text(summary_content, encoding='utf-8')
                 
                 # Update GUI paths
                 self.toc_path = toc_file
@@ -1769,6 +2465,7 @@ class ContentGeneratorGUI:
         Note:
             Validates for minimum length, maximum length, and meaningful content
         """
+        # Check if empty or too short
         if not topic or len(topic.strip()) < 3:
             messagebox.showwarning(
                 "Invalid Input",
@@ -1777,14 +2474,7 @@ class ContentGeneratorGUI:
             logger.warning("Topic validation failed: Too short")
             return False
             
-        if len(topic) > 500:
-            messagebox.showwarning(
-                "Invalid Input",
-                "Topic is too long (max 500 characters)"
-            )
-            logger.warning("Topic validation failed: Too long")
-            return False
-            
+        # Check for meaningful content (not just special characters)
         if not re.search(r'[a-zA-Z]', topic):
             messagebox.showwarning(
                 "Invalid Input",
@@ -1793,7 +2483,24 @@ class ContentGeneratorGUI:
             logger.warning("Topic validation failed: No text characters")
             return False
             
+        # Check maximum length
+        if len(topic) > 500:
+            messagebox.showwarning(
+                "Invalid Input",
+                "Topic is too long (max 500 characters)"
+            )
+            logger.warning("Topic validation failed: Too long")
+            return False
+            
         return True
+
+
+
+
+
+
+
+
 
 
 class ContentGenerationError(Exception):

@@ -101,7 +101,9 @@ def test_parse_toc(mock_toc_file, mock_output_dir, mock_config):
 def test_generate_section_content(mock_toc_file, mock_output_dir, mock_config, mock_api):
     """Test section content generation with mocked API."""
     with patch("src.autowriterllm.ai_content_generator.ContentGenerator._load_config", 
-              return_value=mock_config):
+              return_value=mock_config), \
+         patch("src.autowriterllm.ai_content_generator.ContentGenerator._determine_tutorial_type", 
+              return_value="programming"):
         generator = ContentGenerator(mock_toc_file, mock_output_dir)
         generator.parse_toc()
         section = generator.sections[0]

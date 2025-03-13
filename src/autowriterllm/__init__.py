@@ -1,5 +1,3 @@
-"""AutoWriterLLM - Automatic book writing tool using LLMs."""
+from .ai_content_generator import ContentGenerator, ContentGeneratorGUI, ContentGenerationError
 
-__author__ = """Yang Xiong"""
-__email__ = 'yxiong@umich.edu'
-__version__ = '0.1.0'
+__version__ = "0.2.0"
