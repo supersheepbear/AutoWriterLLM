@@ -536,19 +536,17 @@ Generate a summary that captures the essential concepts of this chapter only."""
             # 获取完整的目录结构
             toc_content = self._get_full_toc_content()
             
-            # 获取上下文内容
-            previous_content = None
-            if not is_main_chapter:
-                # 获取主章节内容
-                main_chapter_title = self._get_parent_chapter_title(section)
-                if main_chapter_title:
-                    previous_content = self._get_main_chapter_content(main_chapter_title)
+            # 存储已生成的内容
+            generated_content = []
             
             # 分多次生成内容
             for part in range(1, total_parts + 1):
                 # 等待速率限制（如果需要）
                 if hasattr(self, 'rate_limiter'):
                     self.rate_limiter.wait_if_needed()
+                
+                # 获取之前生成的所有内容
+                previous_content = "\n\n".join(generated_content) if generated_content else None
                 
                 # 创建提示
                 prompt = self._create_part_prompt(
@@ -571,6 +569,9 @@ Generate a summary that captures the essential concepts of this chapter only."""
                 if is_main_chapter:
                     # 对于主章节，移除可能生成的子章节标题
                     content = self._remove_subsection_headers(content)
+                
+                # 存储生成的内容
+                generated_content.append(content)
                 
                 # 写入文件
                 with open(output_file, 'a', encoding='utf-8') as f:
@@ -685,118 +686,119 @@ Generate a summary that captures the essential concepts of this chapter only."""
             language: 内容语言
             
         Returns:
-            str: 生成的提示
+            str: 生成提示
         """
-        # 确定语言
-        if language == "auto":
-            # 检测标题语言
-            if any('\u4e00' <= char <= '\u9fff' for char in section_title):
-                language = "Chinese"
+        # 获取章节编号
+        chapter_match = re.match(r'^(\d+)\.(\d+)?', section_title)
+        if not chapter_match:
+            raise ValueError(f"Invalid section title format: {section_title}")
+        
+        main_chapter = chapter_match.group(1)
+        sub_chapter = chapter_match.group(2) if chapter_match.group(2) else None
+        
+        # 从目录中提取书籍主题
+        book_title = ""
+        for line in toc.split('\n'):
+            if line.startswith('# '):
+                book_title = line.lstrip('# ').strip()
+                break
+                
+        # 读取书籍摘要
+        summary_file = self.output_dir / "book_summary.md"
+        book_summary = ""
+        if summary_file.exists():
+            try:
+                with open(summary_file, 'r', encoding='utf-8') as f:
+                    book_summary = f.read().strip()
+            except Exception as e:
+                logger.error(f"读取书籍摘要时出错: {e}")
+        
+        if section_level == 2:  # 主章节
+            part_instruction = f"""这是关于"{book_title}"的教材第{main_chapter}章的主要内容。
+
+【书籍摘要】
+{book_summary}
+
+【章节结构要求】
+1. 主章节应提供高层次概述
+2. 重点介绍将在子章节中详细讨论的关键概念
+3. 不包含详细示例或练习
+4. 不创建子章节标题
+
+【内容要求】
+1. 确保内容严格围绕"{book_title}"这个主题
+2. 清晰介绍本章主题及其在整体主题中的位置
+3. 解释概念的重要性和相关性
+4. 概述子章节将涵盖的内容
+5. 保持内容简洁，专注于主要思想
+
+请基于以下目录生成"{section_title}"的内容：
+
+{toc}
+"""
+        else:  # 子章节
+            current_section = f"{main_chapter}.{sub_chapter}.{part}"
+            
+            # 根据part编号设置不同的主题焦点
+            focus_topics = {
+                1: "基础概念和定义",
+                2: "深入分析和应用",
+                3: "高级特性和实践"
+            }
+            
+            current_focus = focus_topics.get(part, "补充内容")
+            
+            part_instruction = f"""这是"{book_title}"教材中子章节 {section_title} 的第 {part} 部分（共 {total_parts} 部分）。
+
+【重要提示】
+本次请求仅生成章节编号 {current_section} 的内容。不要生成其他编号的内容。
+
+【书籍摘要】
+{book_summary}
+
+【本节重点】：{current_focus}
+
+【章节编号】：{current_section}
+
+【结构要求】
+1. 仅使用三级标题（{current_section}）
+2. 不要创建更深层次的标题
+3. 不要使用过渡短语
+4. 保持内容的独立性和完整性
+5. 严格遵守章节编号，只生成 {current_section} 的内容
+
+【内容要求】
+1. 确保内容严格围绕"{book_title}"这个主题
+2. 深入解释概念并提供详细示例
+3. 包含必要的示例和图表
+4. 确保内容自成体系但与主章节主题相关
+5. 避免重复其他部分的内容
+6. 仅生成 {current_section} 的内容，不要生成其他编号的内容
+"""
+
+            # 添加之前生成的内容作为上下文
+            if previous_content:
+                part_instruction += f"\n\n【已生成的内容】\n{previous_content}\n\n请确保新内容与已有内容自然衔接，但不要直接引用或重复。"
+
+            # 只在最后一部分添加练习题要求
+            if part == total_parts:
+                part_instruction += """
+【练习题要求】
+1. 在本节末尾添加练习题
+2. 包含理论和实践题目
+3. 提供清晰的题目说明
+4. 难度适中但具有挑战性
+5. 不要在正文中包含答案
+"""
             else:
-                language = "English"
+                part_instruction += "\n注意：本部分不包含练习题。"
         
-        logger.debug(f"为{section_title}（第{part}/{total_parts}部分）创建提示，语言：{language}")
-        
-        # 根据语言选择提示模板
-        if language == "Chinese":
-            # 中文提示
-            if section_level == 2:  # 主章节
-                part_instruction = f"""这是一个教科书的主章节（{section_title}）。
-
-【章节结构指南】
-1. 主章节应该提供概述性内容，介绍本章的主要概念和框架
-2. 不要在主章节中包含详细内容，详细内容将在子章节中展开
-3. 不要创建任何子章节标题或四级标题
-4. 不要包含结论或总结部分
-5. 不要添加引导到下一章节的过渡短语
-
-【内容要求】
-1. 内容应该是完整的，不依赖于其他章节
-2. 提供清晰的概念介绍和定义
-3. 解释本章内容的重要性和应用场景
-4. 内容应该是学术性的，适合教科书使用
-
-请根据以下目录结构生成内容：
-
-{toc}
-
-请为"{section_title}"生成内容。"""
-            else:  # 子章节
-                part_instruction = f"""这是一个教科书的子章节（{section_title}）。
-
-【章节结构指南】
-1. 子章节应该提供详细内容，深入解释相关概念
-2. 可以包含三级标题（如1.1.1），但不要创建四级标题
-3. 不要包含结论或总结部分
-4. 不要添加引导到下一章节的过渡短语
-
-【内容要求】
-1. 内容应该是完整的，不依赖于其他章节
-2. 提供详细的概念解释、示例和应用
-3. 如果适用，包含公式、算法或代码示例
-4. 内容应该是学术性的，适合教科书使用
-5. 如果这是最后一个子章节，请在最后包含练习题
-
-请根据以下目录结构生成内容：
-
-{toc}
-
-请为"{section_title}"生成内容。"""
-                
-                # 如果有之前的内容，添加到提示中
-                if previous_content:
-                    part_instruction += f"\n\n之前生成的内容：\n\n{previous_content}"
-        else:
-            # 英文提示
-            if section_level == 2:  # 主章节
-                part_instruction = f"""This is a main chapter ({section_title}) for a textbook.
-
-【Chapter Structure Guidelines】
-1. Main chapters should provide an overview, introducing the main concepts and framework
-2. Do not include detailed content in main chapters, as details will be covered in subchapters
-3. Do not create any subchapter headings or quaternary headings
-4. Do not include a conclusion or summary section
-5. Do not add transition phrases leading to the next chapter
-
-【Content Requirements】
-1. Content should be complete in itself, not dependent on other chapters
-2. Provide clear concept introductions and definitions
-3. Explain the importance and application scenarios of the chapter content
-4. Content should be academic in nature, suitable for textbook use
-
-Please generate content based on the following table of contents:
-
-{toc}
-
-Please generate content for "{section_title}".
-"""
-            else:  # 子章节
-                part_instruction = f"""This is a subchapter ({section_title}) for a textbook.
-
-【Chapter Structure Guidelines】
-1. Subchapters should provide detailed content, explaining concepts in depth
-2. You may include tertiary headings (like 1.1.1), but do not create quaternary headings
-3. Do not include a conclusion or summary section
-4. Do not add transition phrases leading to the next chapter
-
-【Content Requirements】
-1. Content should be complete in itself, not dependent on other chapters
-2. Provide detailed concept explanations, examples, and applications
-3. Include formulas, algorithms, or code examples if applicable
-4. Content should be academic in nature, suitable for textbook use
-5. If this is the last subchapter, please include exercise questions at the end
-
-Please generate content based on the following table of contents:
-
-{toc}
-
-Please generate content for "{section_title}".
-"""
-                
-                # 如果有之前的内容，添加到提示中
-                if previous_content:
-                    part_instruction += f"\n\nPreviously generated content:\n\n{previous_content}"
-        
+        # 添加语言指示
+        if language.lower() == "chinese":
+            part_instruction += "\n\n请用中文编写内容。"
+        elif language.lower() == "english":
+            part_instruction += "\n\nPlease write the content in English."
+            
         return part_instruction
 
     def _get_main_chapter_content(self, main_chapter_title: str) -> str:
@@ -1443,7 +1445,7 @@ Write comprehensive content for the section titled "{section.title}".
                 chapter_match = re.search(r'^(\d+)[\.。\s]', section_title)
                 if chapter_match:
                     chapter_num = chapter_match.group(1)
-                    return f"chapter-{chapter_num}.md"
+                return f"chapter-{chapter_num}.md"
                 
                 # 尝试匹配中文数字（一、二、三等）
                 chinese_num_match = re.search(r'^[第]?([一二三四五六七八九十]+)[章節节篇]', section_title)
@@ -1484,7 +1486,7 @@ Write comprehensive content for the section titled "{section.title}".
             logger.warning(f"无法从标题 '{section_title}' 提取章节编号（级别：{section_level}），使用哈希值")
             title_hash = hashlib.md5(section_title.encode()).hexdigest()[:8]
             return f"chapter-{title_hash}.md"
-            
+                
         except Exception as e:
             logger.error(f"创建文件名时出错: {e}")
             # 使用标题的哈希值作为备用
@@ -1990,42 +1992,42 @@ Do not include any other text in your response besides these two markdown code b
                         logger.debug(f"{provider_name}不支持聊天完成，使用HTTP请求：{e}")
                         
                         url = f"{provider_config.get('base_url')}/chat/completions"
-                        headers = {
+                    headers = {
                             "Authorization": f"Bearer {provider_config.get('api_key')}",
-                            "Content-Type": "application/json"
-                        }
-                        
-                        data = {
+                        "Content-Type": "application/json"
+                    }
+                    
+                    data = {
                             "model": model_name,
-                            "messages": [
+                        "messages": [
                                 {"role": "system", "content": system_message},
-                                {"role": "user", "content": prompt}
-                            ],
+                            {"role": "user", "content": prompt}
+                        ],
                             "temperature": temperature,
                             "max_tokens": max_tokens
-                        }
-                        
-                        logger.debug(f"请求数据：{data}")
-                        response = requests.post(url, headers=headers, json=data, timeout=120)
-                        
-                        if response.status_code != 200:
-                            logger.error(f"API错误：{response.status_code} - {response.text}")
-                            raise ContentGenerationError(f"API错误：{response.status_code}")
-                        
-                        result = response.json()
-                        logger.debug(f"API响应：{result}")
-                        
-                        if not result.get("choices"):
-                            logger.error("API响应中没有选择")
-                            raise ContentGenerationError("API响应中没有内容")
-                        
-                        content = result["choices"][0]["message"]["content"]
-                        if not content:
-                            logger.error("API响应中内容为空")
-                            raise ContentGenerationError("API响应中内容为空")
-                        
-                        logger.info(f"成功从{provider_name} API生成内容")
-                        return content
+                    }
+                    
+                    logger.debug(f"请求数据：{data}")
+                    response = requests.post(url, headers=headers, json=data, timeout=120)
+                    
+                    if response.status_code != 200:
+                        logger.error(f"API错误：{response.status_code} - {response.text}")
+                        raise ContentGenerationError(f"API错误：{response.status_code}")
+                    
+                    result = response.json()
+                    logger.debug(f"API响应：{result}")
+                    
+                    if not result.get("choices"):
+                        logger.error("API响应中没有选择")
+                        raise ContentGenerationError("API响应中没有内容")
+                    
+                    content = result["choices"][0]["message"]["content"]
+                    if not content:
+                        logger.error("API响应中内容为空")
+                        raise ContentGenerationError("API响应中内容为空")
+                    
+                    logger.info(f"成功从{provider_name} API生成内容")
+                    return content
                     
             except (requests.Timeout, requests.ConnectionError) as e:
                 logger.warning(f"尝试{attempt + 1}时网络错误：{e}")
@@ -2273,11 +2275,6 @@ Format as YAML."""
                          objectives: List[LearningObjective],
                          prerequisites: List[str]) -> str:
         """Add learning objectives and prerequisites to content.
-        
-        This method adds learning objectives and prerequisites to the content
-        if configured to do so. The metadata is added at the beginning of the
-        content and focuses only on the current chapter without recapping
-        previous chapters.
         
         Args:
             content: The content to add metadata to
