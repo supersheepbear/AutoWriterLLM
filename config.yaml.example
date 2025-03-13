@@ -1,27 +1,104 @@
 # AutoWriterLLM Configuration Example
 # Copy this file to config.yaml and update with your settings
 
-# API Provider Configuration
-provider: "anthropic"  # Options: "anthropic", "lingyiwanwu"
+# Default Provider
+provider: "anthropic"  # The provider to use by default
 
-# Anthropic API Configuration
-anthropic:
-  api_key: "your_anthropic_api_key_here"
-  model: "claude-3-opus-20240229"  # Options: "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"
-
-# Lingyiwanwu API Configuration (alternative provider)
-lingyiwanwu:
-  api_key: "your_lingyiwanwu_api_key_here"
-  model: "claude-3-opus-20240229"
+# Provider Configurations
+providers:
+  # Anthropic Configuration
+  anthropic:
+    api_key: "your_anthropic_api_key_here"
+    base_url: "https://api.anthropic.com"
+    models:
+      - name: "claude-3-opus-20240229"
+        description: "Most powerful Claude model with advanced reasoning"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "claude-3-sonnet-20240229"
+        description: "Balanced Claude model for most tasks"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "claude-3-haiku-20240307"
+        description: "Fast and efficient Claude model"
+        max_tokens: 4096
+        temperature: 0.7
+  
+  # Lingyiwanwu Configuration
+  lingyiwanwu:
+    api_key: "your_lingyiwanwu_api_key_here"
+    base_url: "https://api.lingyiwanwu.com/v1"
+    models:
+      - name: "yi-lightning"
+        description: "Latest high-performance model"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "yi-large"
+        description: "Large model with enhanced capabilities"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "yi-medium"
+        description: "Medium-sized balanced model"
+        max_tokens: 4096
+        temperature: 0.7
+      - name: "yi-vision"
+        description: "Complex vision task model"
+        max_tokens: 4096
+        temperature: 0.7
+      - name: "yi-medium-200k"
+        description: "200K context window model"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "yi-spark"
+        description: "Small but efficient model"
+        max_tokens: 4096
+        temperature: 0.7
+      - name: "yi-large-rag"
+        description: "Real-time web retrieval model"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "yi-large-fc"
+        description: "Function calling support"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "yi-large-turbo"
+        description: "High performance-cost ratio"
+        max_tokens: 8192
+        temperature: 0.7
+  
+  # OpenAI Configuration
+  openai:
+    api_key: "your_openai_api_key_here"
+    base_url: "https://api.openai.com/v1"
+    models:
+      - name: "gpt-4o"
+        description: "Latest GPT-4 Omni model"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "gpt-4-turbo"
+        description: "Fast GPT-4 model"
+        max_tokens: 4096
+        temperature: 0.7
+      - name: "gpt-3.5-turbo"
+        description: "Efficient GPT-3.5 model"
+        max_tokens: 4096
+        temperature: 0.7
+  
+  # Custom Provider Template (copy and modify for additional providers)
+  # custom_provider:
+  #   api_key: "your_api_key_here"
+  #   base_url: "https://api.custom-provider.com/v1"
+  #   models:
+  #     - name: "model-name"
+  #       description: "Model description"
+  #       max_tokens: 4096
+  #       temperature: 0.7
 
 # Content Generation Options
 # These options control how content is generated
-
-# Multi-part content generation
-# When enabled, each section is broken into multiple parts for more comprehensive content
 multi_part_generation: true
 parts_per_section: 5  # Number of parts to generate for each section
-max_tokens_per_part: 8192  # Maximum tokens per part
+max_tokens_per_part: 8192  # Maximum tokens per part (will be overridden by model-specific settings if available)
 
 # Context Management Options
 # These options control how context from previous sections is used

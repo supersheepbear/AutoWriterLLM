@@ -6,6 +6,7 @@ A Python tool that helps automatically generate comprehensive book structures an
 
 - **Universal Textbook Generation**: Generate content for any type of textbook, including programming, science, mathematics, history, literature, business, arts, medicine, philosophy, and language.
 - **Multi-Part Content Generation**: Break down each chapter into multiple parts for more comprehensive, detailed content with better examples and explanations.
+- **Flexible LLM Integration**: Support for any LLM provider with customizable models and API endpoints.
 - **Content Generation**: Automatically generate comprehensive book structures and content using LLMs.
 - **Markdown to PDF Conversion**: Convert generated markdown content to PDF format with customizable styling.
 - **Interactive Content Creation**: Generate quizzes, exercises, and other interactive elements tailored to the content type.
@@ -65,28 +66,68 @@ The system automatically detects the type of content being generated and tailors
 
 ## Configuration
 
-Create a `config.yaml` file to customize the behavior:
+Create a `config.yaml` file to customize the behavior. The new configuration structure supports any LLM provider:
 
 ```yaml
-# API Provider Configuration
-provider: "anthropic"
-anthropic:
-  api_key: "your_anthropic_api_key_here"
-  model: "claude-3-opus-20240229"
+# Default Provider
+provider: "anthropic"  # The provider to use by default
+
+# Provider Configurations
+providers:
+  # Anthropic Configuration
+  anthropic:
+    api_key: "your_anthropic_api_key_here"
+    base_url: "https://api.anthropic.com"
+    models:
+      - name: "claude-3-opus-20240229"
+        description: "Most powerful Claude model with advanced reasoning"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "claude-3-sonnet-20240229"
+        description: "Balanced Claude model for most tasks"
+        max_tokens: 8192
+        temperature: 0.7
+  
+  # OpenAI Configuration
+  openai:
+    api_key: "your_openai_api_key_here"
+    base_url: "https://api.openai.com/v1"
+    models:
+      - name: "gpt-4o"
+        description: "Latest GPT-4 Omni model"
+        max_tokens: 8192
+        temperature: 0.7
+      - name: "gpt-3.5-turbo"
+        description: "Efficient GPT-3.5 model"
+        max_tokens: 4096
+        temperature: 0.7
+  
+  # Custom Provider Example
+  custom_provider:
+    api_key: "your_api_key_here"
+    base_url: "https://api.custom-provider.com/v1"
+    models:
+      - name: "model-name"
+        description: "Model description"
+        max_tokens: 4096
+        temperature: 0.7
 
 # Content Generation Options
 multi_part_generation: true  # Enable multi-part content generation
 parts_per_section: 5         # Number of parts per section
 max_tokens_per_part: 8192    # Maximum tokens per part
-
-# Context Management Options
-include_learning_metadata: true        # Include learning objectives
-include_previous_chapter_context: true # Include context from previous chapters
-include_previous_section_context: true # Include context from previous sections
-
-# Output Options
-output_dir: "output"  # Directory for generated content
 ```
+
+### Adding Custom LLM Providers
+
+You can add any LLM provider by following these steps:
+
+1. Add a new provider section to the `providers` configuration in `config.yaml`
+2. Specify the `api_key` and `base_url` for the provider
+3. Define the available models with their parameters
+4. Set the provider as the default by updating the `provider` field
+
+The system will automatically handle the API calls to the provider using the specified configuration.
 
 ### Multi-Part Content Generation
 
