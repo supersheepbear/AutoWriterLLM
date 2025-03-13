@@ -8,6 +8,7 @@ import time
 import requests
 import httpx
 import anthropic
+import threading
 from openai import OpenAI
 from typing import Any, Dict, Optional, List
 
@@ -36,7 +37,7 @@ class APIRateLimiter:
         """
         self.config = config
         self.request_times: List[float] = []
-        self._lock = httpx.concurrency.ThreadSafeLock()
+        self._lock = threading.Lock()
 
     def wait_if_needed(self) -> None:
         """Wait if we're exceeding rate limits."""
@@ -86,7 +87,9 @@ class APIClientFactory:
             ValueError: If the provider configuration is invalid
         """
         if provider_name is None:
-            provider_name = self.config.get("provider", "anthropic")
+            provider_name = self.config.get("provider")
+            if not provider_name:
+                raise ValueError("No default provider specified in configuration")
         
         try:
             # Get provider configuration

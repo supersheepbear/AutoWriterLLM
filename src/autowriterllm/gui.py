@@ -29,6 +29,7 @@ class ContentGeneratorGUI:
         root (tk.Tk): The root Tkinter window
         topic_var (tk.StringVar): Variable for the topic input
         level_var (tk.StringVar): Variable for the level selection
+        language_var (tk.StringVar): Variable for the language selection
         toc_path (Optional[Path]): Path to the table of contents file
         summary_path (Optional[Path]): Path to the summary file
         output_path (Optional[Path]): Path to the output directory
@@ -46,6 +47,7 @@ class ContentGeneratorGUI:
         self.level_var = tk.StringVar(value="intermediate")
         self.output_path_var = tk.StringVar()
         self.progress_var = tk.DoubleVar()
+        self.language_var = tk.StringVar(value="auto")
         self.toc_path = None
         self.summary_path = None
         self.output_path = None
@@ -115,6 +117,30 @@ class ContentGeneratorGUI:
         level_combo = ttk.Combobox(level_frame, textvariable=self.level_var, values=levels)
         level_combo.pack(side=tk.LEFT, padx=5)
         
+        # Language selection
+        language_frame = ttk.Frame(parent)
+        language_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(language_frame, text="Language:").pack(side=tk.LEFT, padx=5)
+        languages = ["auto", "English", "Chinese"]
+        language_combo = ttk.Combobox(language_frame, textvariable=self.language_var, values=languages, state="readonly")
+        language_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Provider and model selection
+        model_frame = ttk.Frame(parent)
+        model_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Label(model_frame, text="Provider:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.plan_provider_combo = ttk.Combobox(model_frame, textvariable=self.provider_var, state="readonly")
+        self.plan_provider_combo.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.plan_provider_combo.bind("<<ComboboxSelected>>", self._update_model_list)
+        
+        ttk.Label(model_frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.plan_model_combo = ttk.Combobox(model_frame, textvariable=self.model_var, state="readonly")
+        self.plan_model_combo.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+        
+        model_frame.columnconfigure(1, weight=1)
+        
         # Output directory
         output_frame = ttk.Frame(parent)
         output_frame.pack(fill=tk.X, pady=10)
@@ -169,6 +195,11 @@ class ContentGeneratorGUI:
         ttk.Label(model_frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var, state="readonly")
         self.model_combo.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+        
+        ttk.Label(model_frame, text="Language:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.generate_language_combo = ttk.Combobox(model_frame, textvariable=self.language_var, state="readonly")
+        self.generate_language_combo.grid(row=2, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.generate_language_combo["values"] = ["auto", "English", "Chinese"]
         
         model_frame.columnconfigure(1, weight=1)
         
@@ -233,7 +264,11 @@ class ContentGeneratorGUI:
                 
                 # Load provider and model options
                 providers = config.get("providers", {})
-                self.provider_combo["values"] = list(providers.keys())
+                provider_list = list(providers.keys())
+                
+                # Set values for both provider combos
+                self.provider_combo["values"] = provider_list
+                self.plan_provider_combo["values"] = provider_list
                 
                 # Set default provider
                 default_provider = config.get("provider")
@@ -284,35 +319,34 @@ class ContentGeneratorGUI:
             messagebox.showerror("Error", f"Failed to save settings: {e}")
     
     def _update_model_list(self, event=None):
-        """Update the model list based on the selected provider.
-        
-        Args:
-            event: The event that triggered this method (optional)
-        """
+        """Update the model list based on selected provider."""
         try:
             provider = self.provider_var.get()
             if not provider:
                 return
+                
+            # Load config to get provider models
+            with open("config.yaml") as f:
+                config = yaml.safe_load(f)
             
-            config_path = Path("config.yaml")
-            if config_path.exists():
-                with open(config_path) as f:
-                    config = yaml.safe_load(f)
+            providers = config.get("providers", {})
+            provider_config = providers.get(provider, {})
+            models = provider_config.get("models", [])
+            
+            # Get list of model names
+            model_names = [model["name"] for model in models]
+            
+            # Update both model combos
+            self.model_combo["values"] = model_names
+            self.plan_model_combo["values"] = model_names
+            
+            # Set first model as default if available
+            if model_names:
+                self.model_var.set(model_names[0])
                 
-                provider_config = config.get("providers", {}).get(provider, {})
-                models = provider_config.get("models", [])
-                
-                model_names = [model.get("name") for model in models if model.get("name")]
-                self.model_combo["values"] = model_names
-                
-                if model_names:
-                    self.model_var.set(model_names[0])
-                    self.update_log(f"Loaded {len(model_names)} models for {provider}")
-                else:
-                    self.model_var.set("")
-                    self.update_log(f"No models found for {provider}")
         except Exception as e:
             self.update_log(f"Error updating model list: {e}")
+            messagebox.showerror("Error", f"Failed to update model list: {e}")
     
     def _select_toc_file(self):
         """Open file dialog to select a table of contents file."""
@@ -462,9 +496,16 @@ class ContentGeneratorGUI:
             self.update_log("Parsing table of contents")
             self.generator.parse_toc()
             
+            # Get language setting
+            language = self.language_var.get() if hasattr(self, 'language_var') else "auto"
+            self.update_log(f"Using language: {language if language != 'auto' else 'auto-detected'}")
+            
             # Generate content with progress updates
             self.update_log("Starting content generation")
-            self.generator.generate_all_content(progress_callback=self.update_progress)
+            self.generator.generate_all_content(
+                progress_callback=self.update_progress,
+                language=language
+            )
             
             # Complete
             self.update_log("Content generation completed successfully")
@@ -478,27 +519,45 @@ class ContentGeneratorGUI:
             # Re-enable inputs
             self._enable_inputs()
     
-    def update_progress(self, progress: float):
+    def update_progress(self, current: int, total: int, progress: float = None):
         """Update the progress bar and log with the current progress.
         
         Args:
-            progress: The progress percentage (0-100)
+            current: The current unit number
+            total: The total number of units
+            progress: Optional pre-calculated progress value (0-1)
         """
-        self.progress_var.set(progress)
-        if progress % 10 < 1:  # Log every ~10%
-            self.update_log(f"Generation progress: {progress:.1f}%")
+        if total > 0:
+            if progress is not None:
+                # Use provided progress value
+                progress_percent = progress * 100
+            else:
+                # Calculate progress if not provided
+                progress_percent = (current / total) * 100
+            self.progress_var.set(progress_percent)
+            if current % 5 == 0 or current == total:  # Log every 5 units or at completion
+                self.update_log(f"Generation progress: {current}/{total} units ({progress_percent:.1f}%)")
+        else:
+            self.progress_var.set(0)
+            self.update_log("No units to generate")
     
     def _disable_inputs(self):
         """Disable input controls during generation."""
         self.start_button["state"] = tk.DISABLED
         self.provider_combo["state"] = tk.DISABLED
         self.model_combo["state"] = tk.DISABLED
+        self.generate_language_combo["state"] = tk.DISABLED
+        self.plan_provider_combo["state"] = tk.DISABLED
+        self.plan_model_combo["state"] = tk.DISABLED
     
     def _enable_inputs(self):
         """Enable input controls after generation."""
         self.start_button["state"] = tk.NORMAL
         self.provider_combo["state"] = "readonly"
         self.model_combo["state"] = "readonly"
+        self.generate_language_combo["state"] = "readonly"
+        self.plan_provider_combo["state"] = "readonly"
+        self.plan_model_combo["state"] = "readonly"
     
     def _generate_book_plan(self):
         """Generate a book plan based on user input."""
@@ -511,6 +570,21 @@ class ContentGeneratorGUI:
             # Get level
             level = self.level_var.get()
             
+            # Get language
+            language = self.language_var.get()
+            
+            # Get provider and model
+            provider = self.provider_var.get()
+            model = self.model_var.get()
+            
+            if not provider:
+                messagebox.showerror("Error", "Please select an AI provider")
+                return
+                
+            if not model:
+                messagebox.showerror("Error", "Please select a model")
+                return
+            
             # Get output directory
             output_dir = self.output_path_var.get()
             if not output_dir:
@@ -520,23 +594,35 @@ class ContentGeneratorGUI:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             
-            self.update_log(f"Generating book plan for '{topic}' at {level} level")
+            self.update_log(f"Generating book plan for '{topic}' at {level} level in {language if language != 'auto' else 'auto-detected language'} using {provider}/{model}")
             
-            # Initialize generator with dummy TOC (will be generated)
+            # Load config first
+            config_path = Path("config.yaml")
+            if not config_path.exists():
+                messagebox.showerror("Error", "Configuration file not found")
+                return
+                
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+            
+            # Set the provider in the config
+            config["provider"] = provider
+            
+            # Initialize generator with the config
             self.generator = ContentGenerator(None, output_path)
+            self.generator.config = config
             
-            # Create prompt
-            prompt = self.generator._create_book_planning_prompt(
-                f"Create a {level} level textbook on {topic}"
+            # Set the provider and model
+            self.generator.set_model(provider, model)
+            
+            # Generate book plan with specified provider and model
+            toc_content, summary_content = self.generator.generate_book_plan(
+                topic=topic,
+                level=level,
+                provider_name=provider,
+                model_name=model,
+                language=language
             )
-            
-            # Generate content
-            self.update_log("Sending request to AI...")
-            content = self.generator._generate_with_retry(prompt)
-            
-            # Parse response
-            self.update_log("Parsing AI response...")
-            toc_content, summary_content = self.generator._parse_ai_response(content)
             
             # Save files
             toc_file = output_path / "table_of_contents.md"
@@ -597,13 +683,13 @@ class ContentGeneratorGUI:
             return False
         
         # Check for meaningful content (not just special characters)
-        if not re.search(r'[a-zA-Z]', topic):
-            messagebox.showwarning(
-                "Invalid Input",
-                "Topic must contain some text characters"
-            )
-            logger.warning("Topic validation failed: No text characters")
-            return False
+        #if not re.search(r'[a-zA-Z]', topic):
+        #    messagebox.showwarning(
+        #        "Invalid Input",
+        #        "Topic must contain some text characters"
+        #    )
+        #    logger.warning("Topic validation failed: No text characters")
+        #    return False
         
         # Check maximum length
         if len(topic) > 500:

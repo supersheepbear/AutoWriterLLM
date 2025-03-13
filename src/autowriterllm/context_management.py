@@ -30,10 +30,18 @@ class ChapterContext:
 class ContextManager:
     """Manages and optimizes context for AI prompts."""
     
-    def __init__(self, max_context_length: int = 6000):
+    def __init__(self, max_context_length: int = 6000, collection_name: str = "book_content", embedding_model: str = "all-MiniLM-L6-v2"):
+        """Initialize the context manager.
+        
+        Args:
+            max_context_length: Maximum length of context in tokens
+            collection_name: Name of the vector database collection
+            embedding_model: Name of the embedding model to use
+        """
         self.max_context_length = max_context_length
+        self.collection_name = collection_name
         self.chapters: Dict[str, ChapterContext] = {}
-        self.semantic_search = SemanticContextSearch()
+        self.semantic_search = SemanticContextSearch(model_name=embedding_model)
         
     def add_chapter(self, title: str, content: str, summary: str) -> None:
         """Add a chapter to the context manager."""
