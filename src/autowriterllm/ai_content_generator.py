@@ -719,11 +719,18 @@ Generate a summary that captures the essential concepts of this chapter only."""
 【书籍摘要】
 {book_summary}
 
+【完整目录】
+{toc}
+
+【重要提示】
+本次请求仅生成第{main_chapter}章的内容。不要生成其他章节的内容。
+
 【章节结构要求】
 1. 主章节应提供高层次概述
 2. 重点介绍将在子章节中详细讨论的关键概念
 3. 不包含详细示例或练习
 4. 不创建子章节标题
+5. 严格遵守章节编号，只生成第{main_chapter}章的内容
 
 【内容要求】
 1. 确保内容严格围绕"{book_title}"这个主题
@@ -731,13 +738,11 @@ Generate a summary that captures the essential concepts of this chapter only."""
 3. 解释概念的重要性和相关性
 4. 概述子章节将涵盖的内容
 5. 保持内容简洁，专注于主要思想
-
-请基于以下目录生成"{section_title}"的内容：
-
-{toc}
+6. 不要生成其他章节的内容
+7. 不要使用过渡短语引用其他章节
 """
         else:  # 子章节
-            current_section = f"{main_chapter}.{sub_chapter}.{part}"
+            current_section = f"{main_chapter}.{sub_chapter}"
             
             # 根据part编号设置不同的主题焦点
             focus_topics = {
@@ -749,6 +754,9 @@ Generate a summary that captures the essential concepts of this chapter only."""
             current_focus = focus_topics.get(part, "补充内容")
             
             part_instruction = f"""这是"{book_title}"教材中子章节 {section_title} 的第 {part} 部分（共 {total_parts} 部分）。
+
+【完整目录】
+{toc}
 
 【重要提示】
 本次请求仅生成章节编号 {current_section} 的内容。不要生成其他编号的内容。
@@ -766,14 +774,8 @@ Generate a summary that captures the essential concepts of this chapter only."""
 3. 不要使用过渡短语
 4. 保持内容的独立性和完整性
 5. 严格遵守章节编号，只生成 {current_section} 的内容
-
-【内容要求】
-1. 确保内容严格围绕"{book_title}"这个主题
-2. 深入解释概念并提供详细示例
-3. 包含必要的示例和图表
-4. 确保内容自成体系但与主章节主题相关
-5. 避免重复其他部分的内容
-6. 仅生成 {current_section} 的内容，不要生成其他编号的内容
+6. 不要生成其他章节的内容
+7. 不要使用过渡短语引用其他章节
 """
 
             # 添加之前生成的内容作为上下文
